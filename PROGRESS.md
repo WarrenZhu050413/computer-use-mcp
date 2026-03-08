@@ -1571,8 +1571,61 @@ Implements the `text_editor_20250728` specification as an MCP tool for editing f
 - Server version: 1.23.0
 
 ### Next Steps
-- [ ] Terminal detection improvements (more shell/emulator patterns)
+- [x] Terminal detection improvements (more shell/emulator patterns)
 - [ ] Clipboard paste verification (ensure content actually arrived)
 - [ ] Macro: add "edit" mode to modify existing macros
-- [ ] `max_characters` param for text_editor view truncation (20250728 spec)
+- [x] `max_characters` param for text_editor view truncation (20250728 spec)
 - [ ] text_editor view_range with end=-1 edge case testing
+
+## Cycle 31 (2026-03-08)
+
+### text_editor: `max_characters` param (Anthropic spec compliance)
+
+Added optional `max_characters` parameter to `computer_text_editor` view command, matching the `text_editor_20250728` specification.
+
+**Behavior:**
+- When set, truncates file content to that character count before adding line numbers
+- Truncation message matches Anthropic's exact format: `<response clipped><NOTE>...</NOTE>` with grep suggestion
+- When not set (null/undefined/0), falls back to existing `MAX_RESPONSE_LEN` (16KB) safety net
+- `TRUNCATED_MESSAGE` constant extracted for consistency
+
+### Terminal Detection: WM_CLASS via xprop
+
+Improved clipboard paste terminal-vs-GUI detection to check X11 `WM_CLASS` property in addition to window name.
+
+**Why:** Window titles change (e.g. "Terminal - user@host: ~/dir") but WM_CLASS is stable ("xfce4-terminal", "Xfce4-terminal"). Name matching can miss terminals with non-standard titles.
+
+**Changes:**
+- Added `xprop -id <window> WM_CLASS` check alongside `xdotool getwindowname`
+- Added terminal patterns: `foot`, `wezterm`, `st-256color`, `gnome-terminal`
+- Graceful fallback: if xprop not installed, falls back to name-only detection
+- Added `x11-utils` package to Dockerfile for persistent xprop support
+
+### Docker: x11-utils added to Dockerfile
+- `x11-utils` package (provides `xprop`, `xdpyinfo`, `xlsfonts`, etc.)
+- Committed to `~/computer-use-env/` repo
+
+### Real-World Dogfooding
+- Typed unicode text (CJK + emoji) into xfce4-terminal — WM_CLASS detection confirmed working
+- Browsed Anthropic text_editor docs in Firefox to verify max_characters spec
+- Used text_editor to create test files in /workspace
+
+### Verification Results
+- **sc-122**: text_editor max_characters truncation — 5/5 unit tests ✅
+- **sc-123**: terminal WM_CLASS detection — unicode paste in xfce4-terminal ✅
+- **sc-124**: max_characters=null fallback to MAX_RESPONSE_LEN ✅
+
+### Commits
+1. `d764ad7` — feat: add max_characters param to text_editor, improve terminal detection
+
+### Code Stats
+- MCP server: ~3710 lines (up from ~3700)
+- 34 MCP tools (unchanged)
+- Server version: 1.24.0
+
+### Next Steps
+- [ ] Clipboard paste verification (ensure content actually arrived after paste)
+- [ ] Macro: add "edit" mode to modify existing macros
+- [ ] text_editor view_range with end=-1 edge case testing
+- [ ] Real-world: use text_editor for a multi-step editing workflow inside VM
+- [ ] Research: latest Computer Use API changes (new actions, params)
