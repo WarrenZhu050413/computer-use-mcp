@@ -103,9 +103,9 @@ function resolveContainer(name) {
 function findWindowByTitleOrId(title, window_id, cn) {
   if (!title && !window_id) throw new Error("Provide either title or window_id");
   if (window_id) return String(window_id);
-  const wids = dockerExec("xdotool search --onlyvisible --name ''", 10000, cn)
+  const wids = dockerExec("xdotool search --onlyvisible --name '.'", 10000, cn)
     .toString().trim().split("\n").filter(Boolean);
-  for (const wid of wids) {
+  for (const wid of wids.slice(0, 50)) {
     try {
       const name = dockerExec(`xdotool getwindowname ${wid}`, 5000, cn).toString().trim();
       if (name.toLowerCase().includes(title.toLowerCase())) return wid;
@@ -116,11 +116,13 @@ function findWindowByTitleOrId(title, window_id, cn) {
 
 // Get all visible, named windows (excludes desktop/panel). Returns [{wid, name, x, y, w, h}].
 function getVisibleWindows(cn) {
-  const wids = dockerExec("xdotool search --onlyvisible --name ''", 10000, cn)
+  // Use --name '.' to only match windows with non-empty names (regex: any char)
+  // This avoids iterating dozens of unnamed XFCE internal windows
+  const wids = dockerExec("xdotool search --onlyvisible --name '.'", 10000, cn)
     .toString().trim().split("\n").filter(Boolean);
   const windows = [];
-  const skipPatterns = ["desktop", "xfce4-panel", "xfdesktop"];
-  for (const wid of wids.slice(0, 30)) {
+  const skipPatterns = ["desktop", "xfce4-panel", "xfdesktop", "xfwm4", "wrapper-"];
+  for (const wid of wids.slice(0, 50)) {
     try {
       const name = dockerExec(`xdotool getwindowname ${wid}`, 5000, cn).toString().trim();
       if (!name || skipPatterns.some(p => name.toLowerCase().includes(p))) continue;
@@ -1196,9 +1198,9 @@ server.tool(
         output = dockerExec("wmctrl -l -G", 10000, cn).toString();
       } else {
         // Fallback: xdotool search
-        const winIds = dockerExec("xdotool search --onlyvisible --name ''", 10000, cn).toString().trim().split("\n").filter(Boolean);
+        const winIds = dockerExec("xdotool search --onlyvisible --name '.'", 10000, cn).toString().trim().split("\n").filter(Boolean);
         const lines = [];
-        for (const wid of winIds.slice(0, 30)) { // Cap at 30 windows
+        for (const wid of winIds.slice(0, 50)) { // Cap at 50 windows
           try {
             const name = dockerExec(`xdotool getwindowname ${wid}`, 5000, cn).toString().trim();
             const geom = dockerExec(`xdotool getwindowgeometry ${wid}`, 5000, cn).toString().trim();
