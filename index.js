@@ -3225,5 +3225,217 @@ Actions format: [{"action":"key","text":"ctrl+t"},{"action":"type","text":"examp
   }
 );
 
+// === computer_annotate: draw visual annotations on screenshots ===
+
+// Color name to RGB for semi-transparent fills
+const COLOR_RGB = {
+  red: "255,0,0", green: "0,128,0", blue: "0,0,255", yellow: "255,255,0",
+  orange: "255,165,0", purple: "128,0,128", cyan: "0,255,255", magenta: "255,0,255",
+  white: "255,255,255", black: "0,0,0", lime: "0,255,0", pink: "255,192,203"
+};
+
+function colorToRgb(c) {
+  if (COLOR_RGB[c]) return COLOR_RGB[c];
+  if (c && c.startsWith("#")) {
+    const h = c.slice(1);
+    if (h.length === 3) return `${parseInt(h[0]+h[0],16)},${parseInt(h[1]+h[1],16)},${parseInt(h[2]+h[2],16)}`;
+    if (h.length >= 6) return `${parseInt(h.slice(0,2),16)},${parseInt(h.slice(2,4),16)},${parseInt(h.slice(4,6),16)}`;
+  }
+  return "255,0,0";
+}
+
+function apiLengthToDisplay(len, containerName = DEFAULT_CONTAINER) {
+  const env = environments.get(containerName);
+  const w = env?.width || DISPLAY_WIDTH;
+  const h = env?.height || DISPLAY_HEIGHT;
+  const s = getScaleFactor(w, h);
+  return s === 1 ? len : Math.round(len / s);
+}
+
+// Sanitize text for ImageMagick -draw inside single-quoted bash strings
+// Inside single quotes: everything is literal (ImageMagick sees \" as escaped quote)
+// Only single quote itself cannot appear — replace with unicode right single quote
+function sanitizeDrawText(text) {
+  return text.slice(0, 100)
+    .replace(/\\/g, "\\\\")   // escape backslash for IM
+    .replace(/"/g, '\\"')      // escape double quote for IM
+    .replace(/'/g, "\u2019");  // replace single quote (can't appear in bash single-quoted string)
+}
+
+server.tool(
+  "computer_annotate",
+  `Draw visual annotations on the current screenshot for visual communication.
+Annotate elements with rectangles, arrows, circles, text labels, lines, and numbered markers.
+All coordinates are in API space (same as the computer tool).
+Annotations is a JSON array: [{"type":"rectangle","coordinate":[x1,y1],"end_coordinate":[x2,y2]}, ...]
+Types: rectangle (coord+end_coord), arrow (coord start→end_coord tip), circle (coord center, optional radius),
+text (coord+text), line (coord+end_coord), number (coord, optional number).
+Optional on all: color (name or #hex, default red), thickness (1-20, default 3), fill (boolean), font_size (8-72), radius (5-500).`,
+  {
+    annotations: z.string().describe('JSON array of annotation objects. Example: [{"type":"rectangle","coordinate":[100,100],"end_coordinate":[300,200],"color":"red"},{"type":"text","coordinate":[100,80],"text":"Click here","color":"yellow"}]'),
+    save_path: z.string().optional().describe("Save annotated image to this container path (e.g. /workspace/annotated.png)"),
+    container_name: z.string().optional().describe("Target container (default: primary)"),
+  },
+  async ({ annotations, save_path, container_name }) => {
+    try {
+      const cn = resolveContainer(container_name);
+
+      // Parse annotations
+      let annots;
+      try { annots = JSON.parse(annotations); } catch {
+        return { content: [{ type: "text", text: "Error: annotations must be valid JSON array" }], isError: true };
+      }
+      if (!Array.isArray(annots) || annots.length === 0) {
+        return { content: [{ type: "text", text: "Error: annotations must be a non-empty array" }], isError: true };
+      }
+      if (annots.length > 50) {
+        return { content: [{ type: "text", text: "Error: max 50 annotations per call" }], isError: true };
+      }
+
+      const validTypes = ["rectangle", "arrow", "circle", "text", "line", "number"];
+      const validColors = [...Object.keys(COLOR_RGB)];
+
+      // Take screenshot
+      const id = randomUUID().slice(0, 8);
+      const ssPath = `/tmp/_ann_${id}.png`;
+      dockerExec(`scrot -o ${ssPath}`, 30000, cn);
+
+      // Build ImageMagick -draw command segments
+      const drawSegments = [];
+
+      const toDisp = (coord) => {
+        if (!coord || coord.length !== 2) return null;
+        const [dx, dy] = apiToDisplay(coord[0], coord[1], cn);
+        return [Math.round(dx), Math.round(dy)];
+      };
+
+      const cleanup = () => { try { dockerExec(`rm -f ${ssPath}`, 5000, cn); } catch {} };
+      const errReturn = (msg) => { cleanup(); return { content: [{ type: "text", text: msg }], isError: true }; };
+
+      for (let i = 0; i < annots.length; i++) {
+        const a = annots[i];
+        if (!a.type || !validTypes.includes(a.type)) {
+          return errReturn(`Error: annotation ${i}: type must be one of: ${validTypes.join(", ")}`);
+        }
+
+        const color = (a.color && (validColors.includes(a.color) || /^#[0-9a-fA-F]{3,8}$/.test(a.color))) ? a.color : "red";
+        const sw = Math.max(1, Math.min(a.thickness || 3, 20));
+        const p1 = toDisp(a.coordinate);
+        const p2 = toDisp(a.end_coordinate);
+
+        switch (a.type) {
+          case "rectangle": {
+            if (!p1 || !p2) return errReturn(`Error: annotation ${i}: rectangle needs coordinate and end_coordinate`);
+            const fillOpt = a.fill ? `rgba(${colorToRgb(color)},0.3)` : "none";
+            drawSegments.push(`-fill '${fillOpt}' -stroke '${color}' -strokewidth ${sw} -draw 'rectangle ${p1[0]},${p1[1]} ${p2[0]},${p2[1]}'`);
+            break;
+          }
+
+          case "circle": {
+            if (!p1) return errReturn(`Error: annotation ${i}: circle needs coordinate (center)`);
+            const r = apiLengthToDisplay(Math.max(5, Math.min(a.radius || 20, 500)), cn);
+            const fillOpt = a.fill ? `rgba(${colorToRgb(color)},0.3)` : "none";
+            drawSegments.push(`-fill '${fillOpt}' -stroke '${color}' -strokewidth ${sw} -draw 'circle ${p1[0]},${p1[1]} ${p1[0]+r},${p1[1]}'`);
+            break;
+          }
+
+          case "line": {
+            if (!p1 || !p2) return errReturn(`Error: annotation ${i}: line needs coordinate and end_coordinate`);
+            drawSegments.push(`-fill none -stroke '${color}' -strokewidth ${sw} -draw 'line ${p1[0]},${p1[1]} ${p2[0]},${p2[1]}'`);
+            break;
+          }
+
+          case "arrow": {
+            if (!p1 || !p2) return errReturn(`Error: annotation ${i}: arrow needs coordinate (start) and end_coordinate (tip)`);
+            // Shaft
+            drawSegments.push(`-fill none -stroke '${color}' -strokewidth ${sw} -draw 'line ${p1[0]},${p1[1]} ${p2[0]},${p2[1]}'`);
+            // Arrowhead triangle
+            const dx = p2[0] - p1[0], dy = p2[1] - p1[1];
+            const len = Math.sqrt(dx * dx + dy * dy);
+            if (len > 0) {
+              const headLen = Math.max(10, sw * 5);
+              const headW = headLen * 0.6;
+              const ux = dx / len, uy = dy / len;
+              const px = -uy, py = ux;
+              const t1x = Math.round(p2[0] - headLen * ux + headW * px);
+              const t1y = Math.round(p2[1] - headLen * uy + headW * py);
+              const t2x = Math.round(p2[0] - headLen * ux - headW * px);
+              const t2y = Math.round(p2[1] - headLen * uy - headW * py);
+              drawSegments.push(`-fill '${color}' -stroke '${color}' -strokewidth 1 -draw 'polygon ${p2[0]},${p2[1]} ${t1x},${t1y} ${t2x},${t2y}'`);
+            }
+            break;
+          }
+
+          case "text": {
+            if (!p1) return errReturn(`Error: annotation ${i}: text needs coordinate`);
+            if (!a.text) return errReturn(`Error: annotation ${i}: text needs 'text' field`);
+            const fs = apiLengthToDisplay(Math.max(8, Math.min(a.font_size || 20, 72)), cn);
+            const label = sanitizeDrawText(a.text);
+            // Background for readability
+            const textW = Math.round(label.length * fs * 0.6);
+            const textH = Math.round(fs * 1.3);
+            const pad = 4;
+            drawSegments.push(`-fill 'rgba(0,0,0,0.7)' -stroke none -draw 'rectangle ${p1[0] - pad},${p1[1] - textH - pad} ${p1[0] + textW + pad},${p1[1] + pad}'`);
+            drawSegments.push(`-fill '${color}' -stroke none -font Courier-Bold -pointsize ${fs} -draw 'text ${p1[0]},${p1[1]} "${label}"'`);
+            break;
+          }
+
+          case "number": {
+            if (!p1) return errReturn(`Error: annotation ${i}: number needs coordinate`);
+            const num = String(a.number !== undefined ? a.number : (i + 1));
+            const nr = apiLengthToDisplay(Math.max(12, Math.min(a.font_size || 16, 30)), cn);
+            // Filled circle
+            drawSegments.push(`-fill '${color}' -stroke white -strokewidth 2 -draw 'circle ${p1[0]},${p1[1]} ${p1[0] + nr},${p1[1]}'`);
+            // Number label
+            const nfs = Math.round(nr * 1.2);
+            const nox = num.length > 1 ? Math.round(nfs * 0.3 * num.length) : Math.round(nfs * 0.3);
+            drawSegments.push(`-fill white -stroke none -font Courier-Bold -pointsize ${nfs} -draw 'text ${p1[0] - nox},${p1[1] + Math.round(nfs * 0.35)} "${num}"'`);
+            break;
+          }
+        }
+      }
+
+      // Build final convert command
+      const api = getApiDimensions(cn);
+      const env = environments.get(cn);
+      const displayW = env?.width || DISPLAY_WIDTH;
+      const displayH = env?.height || DISPLAY_HEIGHT;
+      const needsScale = api.width !== displayW || api.height !== displayH;
+      const useJpeg = SCREENSHOT_FORMAT === "jpeg" || SCREENSHOT_FORMAT === "jpg";
+      const outExt = useJpeg ? "jpg" : "png";
+      const outPath = `/tmp/_ann_${id}_out.${outExt}`;
+      const scaleCmd = needsScale ? `-resize ${api.width}x${api.height}!` : "";
+      const qualityCmd = useJpeg ? `-quality ${SCREENSHOT_QUALITY}` : "";
+
+      const fullCmd = `convert ${ssPath} ${drawSegments.join(" ")} ${scaleCmd} ${qualityCmd} ${outPath}`;
+      dockerExec(fullCmd, 30000, cn);
+
+      // Save if requested
+      if (save_path) {
+        const safePath = save_path.replace(/'/g, "'\\''");
+        dockerExec(`cp ${outPath} '${safePath}'`, 5000, cn);
+      }
+
+      const b64 = dockerExec(`base64 ${outPath} && rm -f ${ssPath} ${outPath}`, 30000, cn).toString().replace(/\s/g, "");
+      const mime = useJpeg ? "image/jpeg" : "image/png";
+
+      const typeCounts = {};
+      annots.forEach(a => { typeCounts[a.type] = (typeCounts[a.type] || 0) + 1; });
+      const typeStr = Object.entries(typeCounts).map(([t, c]) => `${c} ${t}${c > 1 ? "s" : ""}`).join(", ");
+      let summary = `Annotated screenshot: ${typeStr}`;
+      if (save_path) summary += ` (saved to ${save_path})`;
+
+      return {
+        content: [
+          { type: "image", data: b64, mimeType: mime },
+          { type: "text", text: summary }
+        ]
+      };
+    } catch (err) {
+      return { content: [{ type: "text", text: `Annotate error: ${err.message}` }], isError: true };
+    }
+  }
+);
+
 const transport = new StdioServerTransport();
 await server.connect(transport);
