@@ -1636,27 +1636,31 @@ server.tool(
   "List all managed virtual desktop environments and their status.",
   {},
   async () => {
-    const results = [];
-    for (const [name, env] of environments) {
-      let status = "unknown";
-      try {
-        status = execFileSync("docker", [
-          "inspect", "--format={{.State.Status}}", name
-        ], { timeout: 5000 }).toString().trim();
-      } catch { status = "not found"; }
+    try {
+      const results = [];
+      for (const [name, env] of environments) {
+        let status = "unknown";
+        try {
+          status = execFileSync("docker", [
+            "inspect", "--format={{.State.Status}}", name
+          ], { timeout: 5000 }).toString().trim();
+        } catch { status = "not found"; }
 
-      const lApi = getApiDimensions(name);
-      const lRes = env.width ? `${env.width}x${env.height}` : `${DISPLAY_WIDTH}x${DISPLAY_HEIGHT}`;
-      const lApiRes = `${lApi.width}x${lApi.height}`;
-      const lResInfo = lRes !== lApiRes ? `${lRes} (API:${lApiRes})` : lRes;
-      results.push(
-        `${name}${name === DEFAULT_CONTAINER ? " (default)" : ""}: ${status}` +
-        `  ${lResInfo}  VNC:${env.vncPort}  noVNC:${env.novncPort}  workspace:${env.workspace}`
-      );
+        const lApi = getApiDimensions(name);
+        const lRes = env.width ? `${env.width}x${env.height}` : `${DISPLAY_WIDTH}x${DISPLAY_HEIGHT}`;
+        const lApiRes = `${lApi.width}x${lApi.height}`;
+        const lResInfo = lRes !== lApiRes ? `${lRes} (API:${lApiRes})` : lRes;
+        results.push(
+          `${name}${name === DEFAULT_CONTAINER ? " (default)" : ""}: ${status}` +
+          `  ${lResInfo}  VNC:${env.vncPort}  noVNC:${env.novncPort}  workspace:${env.workspace}`
+        );
+      }
+      return {
+        content: [{ type: "text", text: results.length > 0 ? results.join("\n") : "No environments registered" }]
+      };
+    } catch (err) {
+      return { content: [{ type: "text", text: `Env list error: ${err.message}` }], isError: true };
     }
-    return {
-      content: [{ type: "text", text: results.length > 0 ? results.join("\n") : "No environments registered" }]
-    };
   }
 );
 
@@ -1776,40 +1780,44 @@ server.tool(
     container_name: z.string().optional().describe("Container to record (default: primary)"),
   },
   async ({ name, include_screenshots, container_name }) => {
-    const cn = resolveContainer(container_name);
-    const sessionName = name || `session-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}`;
+    try {
+      const cn = resolveContainer(container_name);
+      const sessionName = name || `session-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}`;
 
-    if (activeSessions.has(sessionName)) {
-      return {
-        content: [{ type: "text", text: `Session '${sessionName}' is already recording` }],
-        isError: true
-      };
-    }
-
-    // Only one active session per container
-    for (const [existingName, session] of activeSessions) {
-      if (session.container === cn) {
+      if (activeSessions.has(sessionName)) {
         return {
-          content: [{ type: "text", text: `Container '${cn}' already has active session '${existingName}'. Stop it first.` }],
+          content: [{ type: "text", text: `Session '${sessionName}' is already recording` }],
           isError: true
         };
       }
+
+      // Only one active session per container
+      for (const [existingName, session] of activeSessions) {
+        if (session.container === cn) {
+          return {
+            content: [{ type: "text", text: `Container '${cn}' already has active session '${existingName}'. Stop it first.` }],
+            isError: true
+          };
+        }
+      }
+
+      const env = environments.get(cn);
+      activeSessions.set(sessionName, {
+        name: sessionName,
+        container: cn,
+        started: new Date().toISOString(),
+        startedMs: Date.now(),
+        resolution: `${env?.width || DISPLAY_WIDTH}x${env?.height || DISPLAY_HEIGHT}`,
+        includeScreenshots: !!include_screenshots,
+        actions: [],
+      });
+
+      return {
+        content: [{ type: "text", text: `Recording started: '${sessionName}' on container '${cn}'\nAll computer actions will be logged. Use computer_session_stop to save.` }]
+      };
+    } catch (err) {
+      return { content: [{ type: "text", text: `Session start error: ${err.message}` }], isError: true };
     }
-
-    const env = environments.get(cn);
-    activeSessions.set(sessionName, {
-      name: sessionName,
-      container: cn,
-      started: new Date().toISOString(),
-      startedMs: Date.now(),
-      resolution: `${env?.width || DISPLAY_WIDTH}x${env?.height || DISPLAY_HEIGHT}`,
-      includeScreenshots: !!include_screenshots,
-      actions: [],
-    });
-
-    return {
-      content: [{ type: "text", text: `Recording started: '${sessionName}' on container '${cn}'\nAll computer actions will be logged. Use computer_session_stop to save.` }]
-    };
   }
 );
 
@@ -1821,73 +1829,77 @@ server.tool(
     discard: z.boolean().optional().describe("If true, discard the recording instead of saving (default: false)"),
   },
   async ({ name, discard }) => {
-    let sessionName = name;
+    try {
+      let sessionName = name;
 
-    // If no name given and exactly one active session, use that
-    if (!sessionName) {
-      if (activeSessions.size === 0) {
-        return { content: [{ type: "text", text: "No active recording sessions" }], isError: true };
+      // If no name given and exactly one active session, use that
+      if (!sessionName) {
+        if (activeSessions.size === 0) {
+          return { content: [{ type: "text", text: "No active recording sessions" }], isError: true };
+        }
+        if (activeSessions.size === 1) {
+          sessionName = activeSessions.keys().next().value;
+        } else {
+          const names = [...activeSessions.keys()].join(", ");
+          return {
+            content: [{ type: "text", text: `Multiple active sessions: ${names}. Specify which to stop.` }],
+            isError: true
+          };
+        }
       }
-      if (activeSessions.size === 1) {
-        sessionName = activeSessions.keys().next().value;
-      } else {
-        const names = [...activeSessions.keys()].join(", ");
+
+      const session = activeSessions.get(sessionName);
+      if (!session) {
+        return { content: [{ type: "text", text: `No active session '${sessionName}'` }], isError: true };
+      }
+
+      activeSessions.delete(sessionName);
+
+      if (discard) {
         return {
-          content: [{ type: "text", text: `Multiple active sessions: ${names}. Specify which to stop.` }],
-          isError: true
+          content: [{ type: "text", text: `Session '${sessionName}' discarded (${session.actions.length} actions)` }]
         };
       }
-    }
 
-    const session = activeSessions.get(sessionName);
-    if (!session) {
-      return { content: [{ type: "text", text: `No active session '${sessionName}'` }], isError: true };
-    }
-
-    activeSessions.delete(sessionName);
-
-    if (discard) {
-      return {
-        content: [{ type: "text", text: `Session '${sessionName}' discarded (${session.actions.length} actions)` }]
+      // Save session to workspace
+      const sessionData = {
+        name: session.name,
+        container: session.container,
+        resolution: session.resolution,
+        include_screenshots: session.includeScreenshots,
+        started: session.started,
+        ended: new Date().toISOString(),
+        duration_ms: Date.now() - session.startedMs,
+        action_count: session.actions.length,
+        actions: session.actions,
       };
+
+      const env = environments.get(session.container);
+      const workspace = env?.workspace || DEFAULT_WORKSPACE;
+      const sessionsDir = `${workspace}/sessions`;
+      try { mkdirSync(sessionsDir, { recursive: true }); } catch {}
+      const filePath = `${sessionsDir}/${sessionName}.json`;
+      writeFileSync(filePath, JSON.stringify(sessionData, null, 2));
+
+      // Build action summary
+      const actionCounts = {};
+      for (const a of session.actions) {
+        actionCounts[a.action] = (actionCounts[a.action] || 0) + 1;
+      }
+      const summary = Object.entries(actionCounts).map(([k, v]) => `  ${k}: ${v}`).join("\n");
+
+      return {
+        content: [{ type: "text", text:
+          `Session '${sessionName}' saved (${session.actions.length} actions, ${Math.round(sessionData.duration_ms / 1000)}s)\n` +
+          `File: ${filePath}\n` +
+          `Resolution: ${session.resolution}\n` +
+          `Actions:\n${summary}\n\n` +
+          `Use computer_session_replay to replay this session.`
+        }]
+      };
+    } catch (err) {
+      return { content: [{ type: "text", text: `Session stop error: ${err.message}` }], isError: true };
     }
-
-    // Save session to workspace
-    const sessionData = {
-      name: session.name,
-      container: session.container,
-      resolution: session.resolution,
-      include_screenshots: session.includeScreenshots,
-      started: session.started,
-      ended: new Date().toISOString(),
-      duration_ms: Date.now() - session.startedMs,
-      action_count: session.actions.length,
-      actions: session.actions,
-    };
-
-    const env = environments.get(session.container);
-    const workspace = env?.workspace || DEFAULT_WORKSPACE;
-    const sessionsDir = `${workspace}/sessions`;
-    try { mkdirSync(sessionsDir, { recursive: true }); } catch {}
-    const filePath = `${sessionsDir}/${sessionName}.json`;
-    writeFileSync(filePath, JSON.stringify(sessionData, null, 2));
-
-    // Build action summary
-    const actionCounts = {};
-    for (const a of session.actions) {
-      actionCounts[a.action] = (actionCounts[a.action] || 0) + 1;
-    }
-    const summary = Object.entries(actionCounts).map(([k, v]) => `  ${k}: ${v}`).join("\n");
-
-    return {
-      content: [{ type: "text", text:
-        `Session '${sessionName}' saved (${session.actions.length} actions, ${Math.round(sessionData.duration_ms / 1000)}s)\n` +
-        `File: ${filePath}\n` +
-        `Resolution: ${session.resolution}\n` +
-        `Actions:\n${summary}\n\n` +
-        `Use computer_session_replay to replay this session.`
-      }]
-    };
   }
 );
 
@@ -1901,6 +1913,7 @@ server.tool(
     dry_run: z.boolean().optional().describe("If true, just list the actions without executing them"),
   },
   async ({ name, speed, container_name, dry_run }) => {
+    try {
     const playbackSpeed = Math.max(0.1, Math.min(speed || 1.0, 10.0));
 
     // Load session — check workspace first, then treat as absolute path
@@ -2017,6 +2030,9 @@ server.tool(
         { type: "text", text: resultText }
       ]
     };
+    } catch (err) {
+      return { content: [{ type: "text", text: `Session replay error: ${err.message}` }], isError: true };
+    }
   }
 );
 
@@ -2035,6 +2051,7 @@ Optional region parameter monitors only a portion of the screen (avoids false tr
     container_name: z.string().optional().describe("Target container (default: primary)"),
   },
   async ({ mode, region, timeout, interval, stable_count, container_name }) => {
+    try {
     const cn = resolveContainer(container_name);
 
     // Helper: take screenshot and return hash + data
@@ -2138,6 +2155,9 @@ Optional region parameter monitors only a portion of the screen (avoids false tr
         { type: "text", text: `Timeout: screen did not stabilize after ${elapsed}s (max consecutive matches: ${consecutiveMatches}, needed ${stable_count - 1}, ${checks} checks)${region ? ` [region ${region.join(",")}]` : ""}` }
       ]
     };
+    } catch (err) {
+      return { content: [{ type: "text", text: `Wait-for error: ${err.message}` }], isError: true };
+    }
   }
 );
 
