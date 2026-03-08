@@ -5567,17 +5567,26 @@ server.tool(
 
         // Re-query tabs before each close to get fresh coordinates
         // (tabs resize/shift after each close, making stale coords unreliable)
+        // Use same timing as the working single-tab close action (500ms after click)
         let closed = 0;
+        const centerApi = getApiDimensions(cn);
+        const [centerDx, centerDy] = apiToDisplay(Math.round(centerApi.width / 2), Math.round(centerApi.height / 2), cn);
         for (let attempt = 0; attempt < expectedClose + 3; attempt++) {
           const fresh = getBrowserTabs();
           if (fresh.error || fresh.tabs.length <= 1) break;
+          const prevCount = fresh.tabs.length;
           // Find a tab that isn't the keep tab (match by title)
           const victim = fresh.tabs.find(t => t.title !== keepTitle);
           if (!victim) break;
           clickTab(victim);
-          await new Promise(r => setTimeout(r, 200));
+          await new Promise(r => setTimeout(r, 500));
           xdotool("key ctrl+w", cn);
-          await new Promise(r => setTimeout(r, 300));
+          // Move mouse to center to prevent tooltip interference on next click
+          xdotool(`mousemove ${centerDx} ${centerDy}`, cn);
+          await new Promise(r => setTimeout(r, 500));
+          // Stuck detection: if tab count didn't decrease, stop
+          const check = getBrowserTabs();
+          if (!check.error && check.tabs.length >= prevCount) break;
           closed++;
         }
 
