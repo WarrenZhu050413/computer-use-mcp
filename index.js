@@ -24,6 +24,15 @@ const MAX_RESPONSE_LEN = 16000;
 const MAX_API_DIMENSION = 1568; // Anthropic spec: max longest edge in API space
 const MAX_API_PIXELS = 1_150_000; // Anthropic spec: max ~1.15 megapixels total
 
+// === Container health tracking ===
+const restartLog = []; // { container, timestamp, reason, success }
+const MAX_RESTART_LOG = 100;
+
+function logRestart(container, reason, success) {
+  restartLog.push({ container, timestamp: new Date().toISOString(), reason, success });
+  if (restartLog.length > MAX_RESTART_LOG) restartLog.shift();
+}
+
 // === Session recording ===
 const activeSessions = new Map(); // sessionName -> { name, container, started, actions[] }
 
@@ -151,7 +160,7 @@ function isContainerRunning(containerName = DEFAULT_CONTAINER) {
   } catch { return false; }
 }
 
-function restartContainer(containerName = DEFAULT_CONTAINER) {
+function restartContainer(containerName = DEFAULT_CONTAINER, reason = "unknown") {
   const env = environments.get(containerName);
   if (!env) return false;
   try {
@@ -174,11 +183,15 @@ function restartContainer(containerName = DEFAULT_CONTAINER) {
         execFileSync("docker", [
           "exec", containerName, "bash", "-c", `DISPLAY=:${dn} xdotool getdisplaygeometry`
         ], { timeout: 5000 });
+        logRestart(containerName, reason, true);
         return true;
       } catch { /* display not ready yet */ }
       execFileSync("sleep", ["1"]);
     }
-  } catch { /* restart failed */ }
+    logRestart(containerName, reason, false);
+  } catch {
+    logRestart(containerName, reason, false);
+  }
   return false;
 }
 
@@ -189,19 +202,23 @@ function getDisplayNumber(containerName = DEFAULT_CONTAINER) {
 
 function dockerExec(cmd, timeoutMs = 30000, containerName = DEFAULT_CONTAINER) {
   const dn = getDisplayNumber(containerName);
+  const execCmd = () => execFileSync("docker", [
+    "exec", containerName, "bash", "-c", `DISPLAY=:${dn} ${cmd}`
+  ], { timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 });
+
   try {
-    return execFileSync("docker", [
-      "exec", containerName, "bash", "-c", `DISPLAY=:${dn} ${cmd}`
-    ], { timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 });
+    return execCmd();
   } catch (err) {
-    // If container is down, attempt auto-recovery (single retry)
+    // If container is down, attempt auto-recovery with retry + backoff
     if (!isContainerRunning(containerName)) {
-      if (restartContainer(containerName)) {
-        return execFileSync("docker", [
-          "exec", containerName, "bash", "-c", `DISPLAY=:${dn} ${cmd}`
-        ], { timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 });
+      const backoffMs = [0, 2000]; // retry delays: immediate, then 2s
+      for (let attempt = 0; attempt < backoffMs.length; attempt++) {
+        if (backoffMs[attempt] > 0) execFileSync("sleep", [String(backoffMs[attempt] / 1000)]);
+        if (restartContainer(containerName, `auto-recovery attempt ${attempt + 1}`)) {
+          try { return execCmd(); } catch { /* command failed after restart, try next */ }
+        }
       }
-      throw new Error(`Container '${containerName}' is not running and auto-restart failed. Original: ${err.message}`);
+      throw new Error(`Container '${containerName}' is not running and auto-restart failed after ${backoffMs.length} attempts. Original: ${err.message}`);
     }
     throw err;
   }
@@ -506,7 +523,7 @@ function executeAction({ action, coordinate, text, scroll_direction, scroll_amou
 
 const server = new McpServer({
   name: "computer-use",
-  version: "1.27.0",
+  version: "1.28.0",
 });
 
 const actionSchema = {
@@ -855,6 +872,129 @@ server.tool(
       return {
         content: [{ type: "text", text: `Container not found or not running: ${err.message}` }],
         isError: true
+      };
+    }
+  }
+);
+
+server.tool(
+  "computer_health_check",
+  "Deep health diagnostics for a container: X11 display, VNC, memory, disk, key processes, and restart history. More detailed than computer_status.",
+  {
+    container_name: z.string().optional().describe("Target container (default: primary)"),
+    repair: z.boolean().optional().describe("Attempt to repair unhealthy components (default: false)"),
+  },
+  async ({ container_name, repair }) => {
+    try {
+      const cn = resolveContainer(container_name);
+      const checks = [];
+      let healthy = true;
+      let repaired = [];
+
+      // 1. Container running
+      const running = isContainerRunning(cn);
+      checks.push({ name: "container", status: running ? "ok" : "FAIL", detail: running ? "running" : "not running" });
+      if (!running) {
+        healthy = false;
+        if (repair) {
+          const ok = restartContainer(cn, "health_check repair");
+          checks[checks.length - 1].detail += ok ? " → repaired (restarted)" : " → repair FAILED";
+          if (ok) repaired.push("container");
+          else return {
+            content: [{ type: "text", text: `Health check: container '${cn}' is down and repair failed.\n\n${checks.map(c => `[${c.status}] ${c.name}: ${c.detail}`).join("\n")}` }],
+            isError: true,
+          };
+        } else {
+          return {
+            content: [{ type: "text", text: `Health check: container '${cn}' is not running. Use repair=true to attempt restart.\n\n[FAIL] container: not running` }],
+            isError: true,
+          };
+        }
+      }
+
+      // 2. X11 display
+      try {
+        const geo = dockerExec("xdotool getdisplaygeometry", 5000, cn).toString().trim();
+        checks.push({ name: "x11_display", status: "ok", detail: geo });
+      } catch {
+        healthy = false;
+        checks.push({ name: "x11_display", status: "FAIL", detail: "Xvfb not responding" });
+      }
+
+      // 3. VNC
+      try {
+        const vnc = dockerExec("pgrep -a x11vnc | head -1", 5000, cn).toString().trim();
+        checks.push({ name: "vnc", status: vnc ? "ok" : "WARN", detail: vnc || "x11vnc not running" });
+        if (!vnc) healthy = false;
+      } catch {
+        checks.push({ name: "vnc", status: "WARN", detail: "x11vnc not detected" });
+      }
+
+      // 4. Window manager
+      try {
+        const wm = dockerExec("pgrep -a xfwm4 | head -1", 5000, cn).toString().trim();
+        checks.push({ name: "window_manager", status: wm ? "ok" : "WARN", detail: wm || "xfwm4 not running" });
+      } catch {
+        checks.push({ name: "window_manager", status: "WARN", detail: "xfwm4 not detected" });
+      }
+
+      // 5. Memory
+      try {
+        const mem = dockerExec("free -m | awk '/Mem:/{printf \"%dMB used / %dMB total (%d%% used)\",$3,$2,($3/$2)*100}'", 5000, cn).toString().trim();
+        const pctMatch = mem.match(/\((\d+)%/);
+        const pct = pctMatch ? parseInt(pctMatch[1]) : 0;
+        const memStatus = pct > 90 ? "WARN" : "ok";
+        if (pct > 90) healthy = false;
+        checks.push({ name: "memory", status: memStatus, detail: mem });
+      } catch {
+        checks.push({ name: "memory", status: "WARN", detail: "could not read" });
+      }
+
+      // 6. Disk
+      try {
+        const disk = dockerExec("df -h /workspace | awk 'NR==2{printf \"%s used / %s total (%s used)\",$3,$2,$5}'", 5000, cn).toString().trim();
+        const diskPctMatch = disk.match(/\((\d+)%/);
+        const diskPct = diskPctMatch ? parseInt(diskPctMatch[1]) : 0;
+        const diskStatus = diskPct > 90 ? "WARN" : "ok";
+        if (diskPct > 90) healthy = false;
+        checks.push({ name: "disk", status: diskStatus, detail: disk });
+      } catch {
+        checks.push({ name: "disk", status: "WARN", detail: "could not read" });
+      }
+
+      // 7. Key processes
+      try {
+        const procs = dockerExec("ps -eo comm --no-headers | sort | uniq -c | sort -rn | head -10", 5000, cn).toString().trim();
+        checks.push({ name: "top_processes", status: "ok", detail: procs });
+      } catch {
+        checks.push({ name: "top_processes", status: "WARN", detail: "could not read" });
+      }
+
+      // 8. Restart history
+      const containerRestarts = restartLog.filter(r => r.container === cn);
+      const recentRestarts = containerRestarts.filter(r => {
+        const age = Date.now() - new Date(r.timestamp).getTime();
+        return age < 3600000; // last hour
+      });
+      const restartStatus = recentRestarts.length >= 3 ? "WARN" : "ok";
+      if (recentRestarts.length >= 3) healthy = false;
+      const restartDetail = containerRestarts.length === 0
+        ? "no restarts recorded"
+        : `${containerRestarts.length} total, ${recentRestarts.length} in last hour` +
+          (containerRestarts.length > 0 ? `\n  last: ${containerRestarts[containerRestarts.length - 1].timestamp} (${containerRestarts[containerRestarts.length - 1].reason}, ${containerRestarts[containerRestarts.length - 1].success ? "success" : "failed"})` : "");
+      checks.push({ name: "restart_history", status: restartStatus, detail: restartDetail });
+
+      // Summary
+      const statusLine = healthy ? "HEALTHY" : "DEGRADED";
+      const summary = `Health: ${statusLine}` +
+        (repaired.length ? `\nRepaired: ${repaired.join(", ")}` : "") +
+        `\n\n` + checks.map(c => `[${c.status.padEnd(4)}] ${c.name}: ${c.detail}`).join("\n");
+
+      return { content: [{ type: "text", text: summary }] };
+    } catch (err) {
+      return {
+        content: [{ type: "text", text: `Health check failed: ${err.message}` }],
+        isError: true,
       };
     }
   }
