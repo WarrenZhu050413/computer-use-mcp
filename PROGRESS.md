@@ -2112,3 +2112,38 @@ Enhanced `computer_tabs list` to read URLs for ALL tabs, not just the active one
 - [ ] A11y-driven scroll (scroll within specific elements, not just the viewport)
 - [ ] Test a11y_fill with tab_between=true and submit=true modes
 - [ ] Monitor for Anthropic API updates (next check in ~2 cycles)
+
+## Cycle 45 (2026-03-08)
+
+### New Features
+
+#### computer_a11y_select (Tool #48)
+Select, check, or toggle UI elements by accessibility role/name. Completes the a11y form automation toolkit alongside a11y_fill.
+
+- **Checkboxes**: Toggle on/off, or specify desired state (`value: "checked"/"unchecked"`) — skips if already correct
+- **Radio buttons**: Click to select, skips if already selected
+- **Combo boxes/dropdowns**: Expand → find option by name → click. Handles both menu items and list items
+- **Toggle buttons**: Same as checkboxes (toggle/desired state)
+- **Batch**: Up to 20 elements per call, single a11y tree query
+- **State-aware**: Reports `already_checked`/`already_selected` with `○` icon vs `✓` for actions taken
+- **Generic fallback**: Unknown roles just get clicked
+- Tested on httpbin.org/forms/post: radio buttons (3/3), checkboxes (4/4, state-awareness verified) ✓
+- Tested on w3schools select element: combo box Volvo→Saab ✓
+
+### Real-World Dogfooding
+- Full form interaction on httpbin.org: text fill (a11y_fill) + radio select + checkbox toggle + combo box selection
+- Browsed w3schools HTML select tutorial, tested combo box on live iframe
+
+### Commits
+1. `50f8cf9` — feat: add computer_a11y_select tool for checkboxes, radio buttons, combo boxes
+
+### Code Stats
+- MCP server: ~5800 lines (up from ~5650)
+- 48 MCP tools (up from 47)
+- Server version: 1.38.0
+
+### Next Steps
+- [ ] Performance: reduce screenshot latency on high-frequency operations
+- [ ] A11y-driven scroll (scroll within specific elements, not just the viewport)
+- [ ] Test a11y_fill with tab_between=true and submit=true modes
+- [ ] Monitor for Anthropic API updates (next check in ~1 cycle)
