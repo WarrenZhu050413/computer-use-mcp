@@ -3172,7 +3172,17 @@ Actions format: [{"action":"key","text":"ctrl+t"},{"action":"type","text":"examp
           for (let i = 0; i < macroActions.length; i++) {
             const a = macroActions[i];
             try {
-              executeAction(a, cn);
+              // Handle actions not covered by executeAction()
+              if (a.action === "wait") {
+                const waitMs = Math.max(0.1, Math.min(a.duration || 1, 30)) * 1000;
+                await new Promise(r => setTimeout(r, waitMs));
+              } else if (a.action === "screenshot" || a.action === "cursor_position") {
+                // No-op in macro context (screenshots are taken at the end)
+              } else if (a.action === "zoom") {
+                // No-op in macro context
+              } else {
+                executeAction(a, cn);
+              }
               totalExecuted++;
 
               // Wait between actions (scaled by speed)
