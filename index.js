@@ -513,6 +513,59 @@ Multi-container: use container_name to target a specific environment (see comput
   actionSchema,
   async ({ action, coordinate, text, scroll_direction, scroll_amount,
            start_coordinate, duration, region, hold_key_action, container_name }) => {
+    // Early validation — return error objects instead of throwing so MCP SDK doesn't swallow messages
+    if (coordinate) {
+      if (!Array.isArray(coordinate) || coordinate.length !== 2) {
+        return { content: [{ type: "text", text: `Error: coordinate must be [x, y], got: ${JSON.stringify(coordinate)}` }], isError: true };
+      }
+      const [cx, cy] = coordinate;
+      if (typeof cx !== "number" || typeof cy !== "number") {
+        return { content: [{ type: "text", text: `Error: coordinate values must be numbers` }], isError: true };
+      }
+      if (cx < 0 || cy < 0) {
+        return { content: [{ type: "text", text: `Error: coordinate [${cx},${cy}] values must be non-negative` }], isError: true };
+      }
+      const api = getApiDimensions(container_name || DEFAULT_CONTAINER);
+      if (cx >= api.width || cy >= api.height) {
+        return { content: [{ type: "text", text: `Error: coordinate [${cx},${cy}] out of bounds (display is ${api.width}x${api.height}, max [${api.width-1},${api.height-1}])` }], isError: true };
+      }
+    }
+    if (start_coordinate) {
+      if (!Array.isArray(start_coordinate) || start_coordinate.length !== 2) {
+        return { content: [{ type: "text", text: `Error: start_coordinate must be [x, y]` }], isError: true };
+      }
+      const [sx, sy] = start_coordinate;
+      if (typeof sx !== "number" || typeof sy !== "number" || sx < 0 || sy < 0) {
+        return { content: [{ type: "text", text: `Error: start_coordinate values must be non-negative numbers` }], isError: true };
+      }
+      const api = getApiDimensions(container_name || DEFAULT_CONTAINER);
+      if (sx >= api.width || sy >= api.height) {
+        return { content: [{ type: "text", text: `Error: start_coordinate [${sx},${sy}] out of bounds (display is ${api.width}x${api.height}, max [${api.width-1},${api.height-1}])` }], isError: true };
+      }
+    }
+    if (action === "left_click_drag" && !start_coordinate) {
+      return { content: [{ type: "text", text: `Error: start_coordinate required for left_click_drag` }], isError: true };
+    }
+    if (action === "left_click_drag" && !coordinate) {
+      return { content: [{ type: "text", text: `Error: coordinate (end position) required for left_click_drag` }], isError: true };
+    }
+    if (scroll_amount !== undefined && scroll_amount !== null) {
+      if (scroll_amount < 0) {
+        return { content: [{ type: "text", text: `Error: scroll_amount must be non-negative` }], isError: true };
+      }
+      if (scroll_amount > 100) {
+        return { content: [{ type: "text", text: `Error: scroll_amount too large (max 100), got ${scroll_amount}` }], isError: true };
+      }
+    }
+    if (duration !== undefined && duration !== null) {
+      if (duration < 0) {
+        return { content: [{ type: "text", text: `Error: duration must be non-negative` }], isError: true };
+      }
+      if (duration > 60) {
+        return { content: [{ type: "text", text: `Error: duration too large (max 60 seconds), got ${duration}` }], isError: true };
+      }
+    }
+
     try {
       const cn = resolveContainer(container_name);
       const label = cn !== DEFAULT_CONTAINER ? ` [${cn}]` : "";
@@ -686,6 +739,7 @@ Multi-container: use container_name to target a specific environment (see comput
       };
 
     } catch (err) {
+      console.error(`[computer] Error in '${action}':`, err.message);
       try {
         const ss = takeScreenshot(container_name || DEFAULT_CONTAINER);
         return {
@@ -695,7 +749,8 @@ Multi-container: use container_name to target a specific environment (see comput
           ],
           isError: true
         };
-      } catch {
+      } catch (ssErr) {
+        console.error(`[computer] Screenshot also failed:`, ssErr.message);
         return {
           content: [{ type: "text", text: `Error: ${err.message}` }],
           isError: true
