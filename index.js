@@ -475,7 +475,7 @@ function executeAction({ action, coordinate, text, scroll_direction, scroll_amou
 
 const server = new McpServer({
   name: "computer-use",
-  version: "1.22.0",
+  version: "1.23.0",
 });
 
 const actionSchema = {
@@ -3436,6 +3436,265 @@ Optional on all: color (name or #hex, default red), thickness (1-20, default 3),
       };
     } catch (err) {
       return { content: [{ type: "text", text: `Annotate error: ${err.message}` }], isError: true };
+    }
+  }
+);
+
+// === Text Editor file history (for undo support) ===
+// Map: "containerName::path" -> string[] (previous file contents)
+const fileEditHistory = new Map();
+
+function fileHistoryKey(containerName, filePath) {
+  return `${containerName}::${filePath}`;
+}
+
+const TEXT_EDITOR_SNIPPET_LINES = 4;
+
+function makeNumberedOutput(fileContent, fileDescriptor, initLine = 1, expandTabs = true) {
+  if (expandTabs) fileContent = fileContent.replace(/\t/g, "    ");
+  // Truncate if too long
+  if (fileContent.length > MAX_RESPONSE_LEN) {
+    fileContent = fileContent.slice(0, MAX_RESPONSE_LEN) + "\n... (truncated)";
+  }
+  const numbered = fileContent.split("\n").map((line, i) =>
+    `${String(i + initLine).padStart(6)}\t${line}`
+  ).join("\n");
+  return `Here's the result of running \`cat -n\` on ${fileDescriptor}:\n${numbered}\n`;
+}
+
+server.tool(
+  "computer_text_editor",
+  `File editor for viewing, creating, and editing files inside a computer-use container.
+Implements the Anthropic text_editor (str_replace_based_edit_tool) spec.
+Commands:
+- view: View file contents with line numbers (or directory listing). Optional view_range=[start,end].
+- create: Create a new file (fails if file exists). Requires file_text.
+- str_replace: Replace exact text in a file. old_str must appear exactly once. new_str defaults to "" (deletion).
+- insert: Insert text at a line number. insert_line=0 inserts at top.
+- undo_edit: Revert the last edit to a file. Can be called multiple times to undo further.
+Paths must be absolute (start with /).`,
+  {
+    command: z.enum(["view", "create", "str_replace", "insert", "undo_edit"]).describe("Editor command"),
+    path: z.string().describe("Absolute path inside the container (e.g. /workspace/file.py)"),
+    file_text: z.string().optional().describe("File content for 'create' command"),
+    view_range: z.array(z.number()).optional().describe("[start_line, end_line] for 'view' (1-indexed, end=-1 for EOF)"),
+    old_str: z.string().optional().describe("Text to find for 'str_replace' (must be unique in file)"),
+    new_str: z.string().optional().describe("Replacement text for 'str_replace' (omit or '' to delete old_str). Also used as insert content for older API compat."),
+    insert_line: z.number().optional().describe("Line number for 'insert' (0=before first line, N=after line N)"),
+    insert_text: z.string().optional().describe("Text to insert at insert_line"),
+    container_name: z.string().optional().describe("Target container (default: primary)"),
+  },
+  async ({ command, path: filePath, file_text, view_range, old_str, new_str, insert_line, insert_text, container_name }) => {
+    try {
+      const cn = resolveContainer(container_name);
+      const safePath = filePath.replace(/'/g, "'\\''");
+
+      // Validate path is absolute
+      if (!filePath.startsWith("/")) {
+        const suggested = "/" + filePath;
+        return { content: [{ type: "text", text: `Error: path '${filePath}' is not absolute. Maybe you meant ${suggested}?` }], isError: true };
+      }
+
+      // Check if path exists and its type
+      let pathExists = false;
+      let isDir = false;
+      try {
+        const check = dockerExec(`test -e '${safePath}' && echo EXISTS || echo MISSING`, 10000, cn).toString().trim();
+        pathExists = check === "EXISTS";
+        if (pathExists) {
+          const dirCheck = dockerExec(`test -d '${safePath}' && echo DIR || echo FILE`, 10000, cn).toString().trim();
+          isDir = dirCheck === "DIR";
+        }
+      } catch {}
+
+      // Path validation
+      if (!pathExists && command !== "create") {
+        return { content: [{ type: "text", text: `Error: path '${filePath}' does not exist. Provide a valid path.` }], isError: true };
+      }
+      if (pathExists && command === "create") {
+        return { content: [{ type: "text", text: `Error: file already exists at ${filePath}. Cannot overwrite with 'create'. Use str_replace to edit.` }], isError: true };
+      }
+      if (isDir && command !== "view") {
+        return { content: [{ type: "text", text: `Error: '${filePath}' is a directory. Only 'view' works on directories.` }], isError: true };
+      }
+
+      // Helper: read file from container
+      const readFile = () => {
+        try {
+          return dockerExec(`cat '${safePath}'`, 30000, cn).toString();
+        } catch (err) {
+          throw new Error(`Failed to read ${filePath}: ${err.stderr?.toString() || err.message}`);
+        }
+      };
+
+      // Helper: write file to container (via base64 to avoid shell escaping)
+      const writeFile = (content) => {
+        const dir = filePath.substring(0, filePath.lastIndexOf("/"));
+        if (dir) {
+          dockerExec(`mkdir -p '${dir.replace(/'/g, "'\\''")}'`, 10000, cn);
+        }
+        const b64 = Buffer.from(content).toString("base64");
+        dockerExec(`echo '${b64}' | base64 -d > '${safePath}'`, 30000, cn);
+      };
+
+      // Helper: save to history
+      const saveHistory = (content) => {
+        const key = fileHistoryKey(cn, filePath);
+        if (!fileEditHistory.has(key)) fileEditHistory.set(key, []);
+        fileEditHistory.get(key).push(content);
+      };
+
+      // === COMMANDS ===
+
+      if (command === "view") {
+        if (isDir) {
+          if (view_range) {
+            return { content: [{ type: "text", text: "Error: view_range is not allowed for directories." }], isError: true };
+          }
+          const listing = dockerExec(`find '${safePath}' -maxdepth 2 -not -path '*/\\.*' 2>/dev/null`, 30000, cn).toString();
+          return { content: [{ type: "text", text: `Files and directories up to 2 levels deep in ${filePath}, excluding hidden items:\n${listing}` }] };
+        }
+
+        let fileContent = readFile();
+        let initLine = 1;
+
+        if (view_range) {
+          if (view_range.length !== 2 || !view_range.every(v => Number.isInteger(v))) {
+            return { content: [{ type: "text", text: "Error: view_range must be [start_line, end_line] (two integers)." }], isError: true };
+          }
+          const lines = fileContent.split("\n");
+          const nLines = lines.length;
+          const [start, end] = view_range;
+          if (start < 1 || start > nLines) {
+            return { content: [{ type: "text", text: `Error: view_range start ${start} out of range [1, ${nLines}].` }], isError: true };
+          }
+          if (end !== -1 && end > nLines) {
+            return { content: [{ type: "text", text: `Error: view_range end ${end} exceeds file length ${nLines}.` }], isError: true };
+          }
+          if (end !== -1 && end < start) {
+            return { content: [{ type: "text", text: `Error: view_range end ${end} must be >= start ${start}.` }], isError: true };
+          }
+          initLine = start;
+          fileContent = end === -1
+            ? lines.slice(start - 1).join("\n")
+            : lines.slice(start - 1, end).join("\n");
+        }
+
+        return { content: [{ type: "text", text: makeNumberedOutput(fileContent, filePath, initLine) }] };
+      }
+
+      if (command === "create") {
+        if (file_text === undefined || file_text === null) {
+          return { content: [{ type: "text", text: "Error: file_text is required for 'create' command." }], isError: true };
+        }
+        writeFile(file_text);
+        saveHistory(file_text);
+        return { content: [{ type: "text", text: `File created successfully at: ${filePath}` }] };
+      }
+
+      if (command === "str_replace") {
+        if (old_str === undefined || old_str === null) {
+          return { content: [{ type: "text", text: "Error: old_str is required for 'str_replace' command." }], isError: true };
+        }
+
+        let fileContent = readFile().replace(/\t/g, "    ");
+        const oldExpanded = old_str.replace(/\t/g, "    ");
+        const newExpanded = (new_str || "").replace(/\t/g, "    ");
+
+        // Check uniqueness
+        const occurrences = fileContent.split(oldExpanded).length - 1;
+        if (occurrences === 0) {
+          return { content: [{ type: "text", text: `Error: old_str not found verbatim in ${filePath}. No replacement performed.` }], isError: true };
+        }
+        if (occurrences > 1) {
+          const lineNums = [];
+          fileContent.split("\n").forEach((line, idx) => {
+            if (line.includes(oldExpanded)) lineNums.push(idx + 1);
+          });
+          return { content: [{ type: "text", text: `Error: old_str found ${occurrences} times (lines ${lineNums.join(", ")}). Must be unique. Add more context to disambiguate.` }], isError: true };
+        }
+
+        // Save before editing
+        saveHistory(fileContent);
+
+        // Replace
+        const newFileContent = fileContent.replace(oldExpanded, newExpanded);
+        writeFile(newFileContent);
+
+        // Build snippet
+        const replacementLine = fileContent.split(oldExpanded)[0].split("\n").length - 1;
+        const startLine = Math.max(0, replacementLine - TEXT_EDITOR_SNIPPET_LINES);
+        const endLine = replacementLine + TEXT_EDITOR_SNIPPET_LINES + newExpanded.split("\n").length - 1;
+        const snippet = newFileContent.split("\n").slice(startLine, endLine + 1).join("\n");
+
+        let msg = `The file ${filePath} has been edited. `;
+        msg += makeNumberedOutput(snippet, `a snippet of ${filePath}`, startLine + 1);
+        msg += "Review the changes and make sure they are as expected. Edit the file again if necessary.";
+        return { content: [{ type: "text", text: msg }] };
+      }
+
+      if (command === "insert") {
+        if (insert_line === undefined || insert_line === null) {
+          return { content: [{ type: "text", text: "Error: insert_line is required for 'insert' command." }], isError: true };
+        }
+        // Accept insert_text (20250728 spec) or new_str (older compat)
+        const textToInsert = insert_text !== undefined && insert_text !== null ? insert_text : new_str;
+        if (textToInsert === undefined || textToInsert === null) {
+          return { content: [{ type: "text", text: "Error: insert_text is required for 'insert' command." }], isError: true };
+        }
+
+        let fileContent = readFile().replace(/\t/g, "    ");
+        const insertExpanded = textToInsert.replace(/\t/g, "    ");
+        const lines = fileContent.split("\n");
+
+        if (insert_line < 0 || insert_line > lines.length) {
+          return { content: [{ type: "text", text: `Error: insert_line ${insert_line} out of range [0, ${lines.length}].` }], isError: true };
+        }
+
+        // Save before editing
+        saveHistory(fileContent);
+
+        const insertLines = insertExpanded.split("\n");
+        const newLines = [
+          ...lines.slice(0, insert_line),
+          ...insertLines,
+          ...lines.slice(insert_line)
+        ];
+        const snippetLines = [
+          ...lines.slice(Math.max(0, insert_line - TEXT_EDITOR_SNIPPET_LINES), insert_line),
+          ...insertLines,
+          ...lines.slice(insert_line, insert_line + TEXT_EDITOR_SNIPPET_LINES)
+        ];
+
+        const newFileContent = newLines.join("\n");
+        writeFile(newFileContent);
+
+        let msg = `The file ${filePath} has been edited. `;
+        msg += makeNumberedOutput(
+          snippetLines.join("\n"),
+          "a snippet of the edited file",
+          Math.max(1, insert_line - TEXT_EDITOR_SNIPPET_LINES + 1)
+        );
+        msg += "Review the changes and make sure they are as expected (correct indentation, no duplicate lines, etc). Edit the file again if necessary.";
+        return { content: [{ type: "text", text: msg }] };
+      }
+
+      if (command === "undo_edit") {
+        const key = fileHistoryKey(cn, filePath);
+        const history = fileEditHistory.get(key);
+        if (!history || history.length === 0) {
+          return { content: [{ type: "text", text: `Error: no edit history for ${filePath}. Nothing to undo.` }], isError: true };
+        }
+
+        const previousContent = history.pop();
+        writeFile(previousContent);
+        return { content: [{ type: "text", text: `Reverted ${filePath} to previous version. ${history.length} undo step(s) remaining.` }] };
+      }
+
+      return { content: [{ type: "text", text: `Error: unknown command '${command}'.` }], isError: true };
+
+    } catch (err) {
+      return { content: [{ type: "text", text: `Text editor error: ${err.message}` }], isError: true };
     }
   }
 );
