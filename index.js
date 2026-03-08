@@ -26,6 +26,15 @@ function xdotool(args) {
   dockerExec(`xdotool ${args}`);
 }
 
+function validateCoord(coord, name = "coordinate") {
+  if (!coord || coord.length !== 2) throw new Error(`${name} must be [x, y]`);
+  const [x, y] = coord;
+  if (x < 0 || x >= DISPLAY_WIDTH || y < 0 || y >= DISPLAY_HEIGHT) {
+    throw new Error(`${name} [${x},${y}] out of bounds (display is ${DISPLAY_WIDTH}x${DISPLAY_HEIGHT})`);
+  }
+  return [Math.round(x), Math.round(y)];
+}
+
 function mapKey(key) {
   const keyMap = {
     Return: "Return", Enter: "Return",
@@ -97,8 +106,7 @@ Every action (except screenshot, wait) returns a screenshot showing the result.`
         }
 
         case "left_click": {
-          if (!coordinate) throw new Error("coordinate required for left_click");
-          const [x, y] = coordinate;
+          const [x, y] = validateCoord(coordinate);
           if (text) {
             const mod = mapKey(text);
             xdotool(`mousemove ${x} ${y} keydown ${mod} click 1 keyup ${mod}`);
@@ -109,37 +117,33 @@ Every action (except screenshot, wait) returns a screenshot showing the result.`
         }
 
         case "right_click": {
-          if (!coordinate) throw new Error("coordinate required for right_click");
-          const [x, y] = coordinate;
+          const [x, y] = validateCoord(coordinate);
           xdotool(`mousemove ${x} ${y} click 3`);
           break;
         }
 
         case "middle_click": {
-          if (!coordinate) throw new Error("coordinate required for middle_click");
-          const [x, y] = coordinate;
+          const [x, y] = validateCoord(coordinate);
           xdotool(`mousemove ${x} ${y} click 2`);
           break;
         }
 
         case "double_click": {
-          if (!coordinate) throw new Error("coordinate required for double_click");
-          const [x, y] = coordinate;
+          const [x, y] = validateCoord(coordinate);
           xdotool(`mousemove ${x} ${y} click --repeat 2 --delay 100 1`);
           break;
         }
 
         case "triple_click": {
-          if (!coordinate) throw new Error("coordinate required for triple_click");
-          const [x, y] = coordinate;
+          const [x, y] = validateCoord(coordinate);
           xdotool(`mousemove ${x} ${y} click --repeat 3 --delay 100 1`);
           break;
         }
 
         case "left_click_drag": {
-          if (!start_coordinate) throw new Error("start_coordinate required for left_click_drag");
-          if (!coordinate) throw new Error("coordinate (end position) required for left_click_drag");
-          xdotool(`mousemove ${start_coordinate[0]} ${start_coordinate[1]} mousedown 1 mousemove ${coordinate[0]} ${coordinate[1]} mouseup 1`);
+          const [sx, sy] = validateCoord(start_coordinate, "start_coordinate");
+          const [ex, ey] = validateCoord(coordinate, "coordinate (end)");
+          xdotool(`mousemove ${sx} ${sy} mousedown 1 mousemove ${ex} ${ey} mouseup 1`);
           break;
         }
 
@@ -158,15 +162,13 @@ Every action (except screenshot, wait) returns a screenshot showing the result.`
         }
 
         case "mouse_move": {
-          if (!coordinate) throw new Error("coordinate required for mouse_move");
-          const [x, y] = coordinate;
+          const [x, y] = validateCoord(coordinate);
           xdotool(`mousemove ${x} ${y}`);
           break;
         }
 
         case "scroll": {
-          if (!coordinate) throw new Error("coordinate required for scroll");
-          const [x, y] = coordinate;
+          const [x, y] = validateCoord(coordinate);
           const dir = scroll_direction || "down";
           const amount = scroll_amount || 3;
           xdotool(`mousemove ${x} ${y}`);
@@ -180,7 +182,7 @@ Every action (except screenshot, wait) returns a screenshot showing the result.`
 
         case "left_mouse_down": {
           if (coordinate) {
-            const [x, y] = coordinate;
+            const [x, y] = validateCoord(coordinate);
             xdotool(`mousemove ${x} ${y} mousedown 1`);
           } else {
             xdotool(`mousedown 1`);
@@ -190,7 +192,7 @@ Every action (except screenshot, wait) returns a screenshot showing the result.`
 
         case "left_mouse_up": {
           if (coordinate) {
-            const [x, y] = coordinate;
+            const [x, y] = validateCoord(coordinate);
             xdotool(`mousemove ${x} ${y} mouseup 1`);
           } else {
             xdotool(`mouseup 1`);
