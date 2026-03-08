@@ -2027,7 +2027,45 @@ Shared helper extracted from computer_a11y_click — queries AT-SPI2 flat tree a
 - Server version: 1.35.0
 
 ### Next Steps
-- [ ] Monitor for API updates (next check in ~2 cycles)
-- [ ] Browser tab management tool (list/close/switch tabs)
+- [x] Browser tab management tool (list/close/switch tabs) → done in cycle 43
 - [ ] Performance: reduce screenshot latency on high-frequency operations
 - [ ] A11y-driven form automation (fill multiple fields in one call)
+
+## Cycle 43 (2026-03-08)
+
+### New Features
+
+#### computer_tabs (Tool #46)
+Browser tab management using AT-SPI2 accessibility tree. 4 actions: list, switch, close, new.
+
+- **list**: Shows all browser tabs with index, title, active marker (→). Optional `include_url=true` reads active tab URL from address bar.
+- **switch**: Activate a tab by index (0-based) or title substring (case-insensitive).
+- **close**: Close a tab by index or title substring. Safety guard prevents closing last tab.
+- **new**: Open new tab, optionally navigate to a URL.
+- Filters browser tabs from in-page tabs (e.g. JSON/Raw Data/Headers) using a11y tree path (must be under "Browser tabs" toolbar).
+
+### Research: Anthropic API Status
+- No API changes since `computer_20251124` — still the latest computer use tool version
+- No new text editor version since `text_editor_20250728`
+- New Anthropic tools (code_execution, web_search, web_fetch) are server-side hosted tools — not relevant to desktop computer use
+- Project remains fully spec-compliant with 46 tools exceeding all competitors
+
+### Real-World Dogfooding
+- Listed 5 browser tabs with titles and active URL extraction (https://httpbin.org/get)
+- Switched to "Example Domain" tab by title substring — page loaded correctly
+- Closed "Firefox Privacy Notice" tab — 4 tabs remaining confirmed
+- Opened new tab with https://news.ycombinator.com — HN loaded successfully
+
+### Commits
+1. `69c5975` — feat: add computer_tabs tool for browser tab management
+
+### Code Stats
+- MCP server: ~5500 lines (up from ~5300)
+- 46 MCP tools (up from 45)
+- Server version: 1.36.0
+
+### Next Steps
+- [ ] Performance: reduce screenshot latency on high-frequency operations
+- [ ] A11y-driven form automation (fill multiple fields in one call)
+- [ ] A11y-driven scroll (scroll within specific elements, not just the viewport)
+- [ ] Monitor for Anthropic API updates (next check in ~3 cycles)
