@@ -388,11 +388,7 @@ server.tool(
   async ({ command, timeout }) => {
     try {
       const ms = (timeout || 120) * 1000;
-      const escaped = command.replace(/"/g, '\\"');
-      let result = execSync(
-        `docker exec ${CONTAINER} bash -c "DISPLAY=:1 ${escaped}"`,
-        { timeout: ms, maxBuffer: 5 * 1024 * 1024 }
-      ).toString();
+      let result = dockerExec(command, ms).toString();
       if (result.length > MAX_RESPONSE_LEN) {
         result = result.slice(0, MAX_RESPONSE_LEN) + `\n... (truncated at ${MAX_RESPONSE_LEN} chars)`;
       }
