@@ -740,16 +740,17 @@ server.tool(
 
     try {
       // Kill Xvfb and x11vnc, restart with new resolution
-      dockerExec(`bash -c 'kill $(pgrep -f "Xvfb :1") 2>/dev/null || true'`, 10000, cn);
-      dockerExec(`bash -c 'kill $(pgrep -f "x11vnc") 2>/dev/null || true'`, 10000, cn);
+      // Note: dockerExec already wraps in bash -c, so no nested bash -c needed
+      dockerExec(`kill $(pgrep -f 'Xvfb :1') 2>/dev/null || true`, 10000, cn);
+      dockerExec(`kill $(pgrep -f x11vnc) 2>/dev/null || true`, 10000, cn);
       await new Promise(r => setTimeout(r, 1000));
 
-      // Start new Xvfb with requested resolution
-      dockerExec(`bash -c 'Xvfb :1 -screen 0 ${width}x${height}x24 +extension GLX +render -noreset &'`, 10000, cn);
+      // Start new Xvfb with requested resolution (nohup + & to background)
+      dockerExec(`nohup Xvfb :1 -screen 0 ${width}x${height}x24 +extension GLX +render -noreset > /dev/null 2>&1 &`, 10000, cn);
       await new Promise(r => setTimeout(r, 2000));
 
       // Restart x11vnc
-      dockerExec(`bash -c 'x11vnc -display :1 -forever -passwd secret -noxdamage -shared -rfbport 5900 -noscr &'`, 10000, cn);
+      dockerExec(`nohup x11vnc -display :1 -forever -passwd secret -noxdamage -shared -rfbport 5900 -noscr > /dev/null 2>&1 &`, 10000, cn);
       await new Promise(r => setTimeout(r, 1000));
 
       // Verify new resolution
