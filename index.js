@@ -2,7 +2,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { execSync } from "child_process";
+import { execSync, execFileSync } from "child_process";
 import { randomUUID } from "crypto";
 
 const CONTAINER = process.env.CONTAINER_NAME || "computer-use";
@@ -14,11 +14,13 @@ const TYPING_DELAY_MS = 12;
 const MAX_RESPONSE_LEN = 16000;
 
 function dockerExec(cmd, timeoutMs = 30000) {
-  const escaped = cmd.replace(/"/g, '\\"');
-  return execSync(
-    `docker exec ${CONTAINER} bash -c "DISPLAY=:1 ${escaped}"`,
-    { timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 }
-  );
+  // Use execFileSync with arg array to avoid host shell interpretation.
+  // The command is passed directly to bash -c inside the container,
+  // so pipes, redirects, $vars etc. work inside container but aren't
+  // mangled by the host shell.
+  return execFileSync("docker", [
+    "exec", CONTAINER, "bash", "-c", `DISPLAY=:1 ${cmd}`
+  ], { timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 });
 }
 
 function takeScreenshot() {
@@ -39,8 +41,8 @@ function validateCoord(coord, name = "coordinate") {
   if (typeof x !== "number" || typeof y !== "number" || x < 0 || y < 0) {
     throw new Error(`${name} values must be non-negative numbers`);
   }
-  if (x > DISPLAY_WIDTH || y > DISPLAY_HEIGHT) {
-    throw new Error(`${name} [${x},${y}] out of bounds (display is ${DISPLAY_WIDTH}x${DISPLAY_HEIGHT})`);
+  if (x >= DISPLAY_WIDTH || y >= DISPLAY_HEIGHT) {
+    throw new Error(`${name} [${x},${y}] out of bounds (display is ${DISPLAY_WIDTH}x${DISPLAY_HEIGHT}, max [${DISPLAY_WIDTH-1},${DISPLAY_HEIGHT-1}])`);
   }
   return [Math.round(x), Math.round(y)];
 }
@@ -150,7 +152,8 @@ function executeAction({ action, coordinate, text, scroll_direction, scroll_amou
       if (!text) throw new Error("text required for type action");
       // xdotool type --file silently drops newline characters.
       // Split on newlines and press Return between segments.
-      const lines = text.split("\n");
+      // Normalize \r\n and \r to \n first.
+      const lines = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
       for (let i = 0; i < lines.length; i++) {
         if (lines[i].length > 0) {
           const b64Text = Buffer.from(lines[i]).toString("base64");
