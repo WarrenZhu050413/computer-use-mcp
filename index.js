@@ -209,15 +209,24 @@ function dockerExec(cmd, timeoutMs = 30000, containerName = DEFAULT_CONTAINER) {
 
 function takeScreenshot(containerName = DEFAULT_CONTAINER) {
   const id = randomUUID().slice(0, 8);
-  const pngPath = `/tmp/_ss_${id}.png`;
-  dockerExec(`scrot -o ${pngPath}`, 30000, containerName);
-
   const api = getApiDimensions(containerName);
   const env = environments.get(containerName);
   const displayW = env?.width || DISPLAY_WIDTH;
   const displayH = env?.height || DISPLAY_HEIGHT;
   const needsScale = api.width !== displayW || api.height !== displayH;
   const useJpeg = SCREENSHOT_FORMAT === "jpeg" || SCREENSHOT_FORMAT === "jpg";
+
+  // Fast path: scrot direct JPEG when no scaling needed (~5ms vs ~30ms with convert)
+  if (useJpeg && !needsScale) {
+    const jpgPath = `/tmp/_ss_${id}.jpg`;
+    dockerExec(`scrot -o -q ${SCREENSHOT_QUALITY} ${jpgPath}`, 30000, containerName);
+    const b64 = dockerExec(`base64 ${jpgPath} && rm -f ${jpgPath}`, 30000, containerName).toString().replace(/\s/g, "");
+    return { data: b64, mimeType: "image/jpeg", apiWidth: api.width, apiHeight: api.height };
+  }
+
+  // Standard path: scrot PNG + optional convert (for scaling or format conversion)
+  const pngPath = `/tmp/_ss_${id}.png`;
+  dockerExec(`scrot -o ${pngPath}`, 30000, containerName);
 
   if (needsScale || useJpeg) {
     const outExt = useJpeg ? "jpg" : "png";
@@ -497,7 +506,7 @@ function executeAction({ action, coordinate, text, scroll_direction, scroll_amou
 
 const server = new McpServer({
   name: "computer-use",
-  version: "1.25.0",
+  version: "1.26.0",
 });
 
 const actionSchema = {
