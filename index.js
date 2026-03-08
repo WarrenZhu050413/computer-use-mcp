@@ -527,7 +527,7 @@ function executeAction({ action, coordinate, text, scroll_direction, scroll_amou
 
 const server = new McpServer({
   name: "computer-use",
-  version: "1.40.0",
+  version: "1.41.0",
 });
 
 const actionSchema = {
@@ -5919,6 +5919,116 @@ server.tool(
       };
     } catch (err) {
       return { content: [{ type: "text", text: `A11y fill error: ${err.message}` }], isError: true };
+    }
+  }
+);
+
+// ── computer_a11y_wait ──────────────────────────────────────────
+server.tool(
+  "computer_a11y_wait",
+  `Wait for a UI element to appear or disappear using the accessibility tree. Much more reliable than OCR-based wait_for_text.
+Examples: wait for a "Submit" button to appear after page load, wait for a "Loading..." spinner to disappear, wait for a dialog to pop up.
+Returns a screenshot when the condition is met (or on timeout).`,
+  {
+    role: z.string().optional().describe("Accessibility role to match (e.g. 'push button', 'link', 'dialog', 'alert', 'progress bar')"),
+    name: z.string().optional().describe("Element name/label to match (substring, case-insensitive). E.g. 'Submit', 'Loading', 'Error'"),
+    mode: z.enum(["appear", "disappear"]).default("appear").describe("'appear': wait until element exists (default). 'disappear': wait until element is gone."),
+    timeout: z.number().default(10).describe("Max seconds to wait (default: 10, max: 60)"),
+    interval: z.number().default(500).describe("Poll interval in ms (default: 500, min: 200, max: 5000)"),
+    click: z.boolean().default(false).describe("Auto-click the element when found (appear mode only, default: false)"),
+    app: z.string().optional().describe("Filter by application name (e.g. 'Firefox')"),
+    window_title: z.string().optional().describe("Filter by window title substring"),
+    require_showing: z.boolean().default(false).describe("In appear mode, require element to have 'showing' state (visible on screen), not just present in tree"),
+    container_name: z.string().optional().describe("Target container (default: primary)"),
+  },
+  async ({ role, name, mode, timeout, interval, click, app, window_title, require_showing, container_name }) => {
+    const cn = container_name || DEFAULT_CONTAINER;
+    try {
+      if (!role && !name) {
+        return { content: [{ type: "text", text: "Error: at least one of 'role' or 'name' must be specified" }], isError: true };
+      }
+
+      const timeoutMs = Math.max(1, Math.min(timeout ?? 10, 60)) * 1000;
+      const intervalMs = Math.max(200, Math.min(interval ?? 500, 5000));
+      const startTime = Date.now();
+      let lastMatches = [];
+      let polls = 0;
+
+      while (Date.now() - startTime < timeoutMs) {
+        const q = queryA11yFlat({ role, name, app, window_title, container_name: cn });
+        polls++;
+
+        if (q.error) {
+          // A11y tree query failed — retry unless it's a structural error
+          if (Date.now() - startTime + intervalMs >= timeoutMs) {
+            return { content: [{ type: "text", text: `A11y wait error after ${polls} polls: ${q.error}` }], isError: true };
+          }
+          await new Promise(r => setTimeout(r, intervalMs));
+          continue;
+        }
+
+        // Filter by showing state if required
+        let effectiveMatches = q.matches;
+        if (require_showing && mode === "appear") {
+          effectiveMatches = q.matches.filter(m => (m.states || []).includes("showing"));
+        }
+        lastMatches = effectiveMatches;
+
+        if (mode === "appear" && effectiveMatches.length > 0) {
+          // Element found!
+          const target = effectiveMatches[0];
+          const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+
+          if (click && target.bbox) {
+            const cx = Math.round(target.bbox.x + target.bbox.width / 2);
+            const cy = Math.round(target.bbox.y + target.bbox.height / 2);
+            xdotool(`mousemove ${cx} ${cy} click 1`, cn);
+            await new Promise(r => setTimeout(r, SCREENSHOT_DELAY_MS));
+          } else {
+            await new Promise(r => setTimeout(r, 300));
+          }
+
+          const ss = takeScreenshot(cn);
+          return {
+            content: [
+              { type: "image", data: ss.data, mimeType: ss.mimeType },
+              { type: "text", text: `Element appeared after ${elapsed}s (${polls} polls): ${target.role} "${target.name}"${click ? ` — clicked at [${Math.round(target.bbox.x + target.bbox.width / 2)}, ${Math.round(target.bbox.y + target.bbox.height / 2)}]` : ""}` }
+            ]
+          };
+        }
+
+        if (mode === "disappear" && effectiveMatches.length === 0) {
+          // Element gone!
+          const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+          await new Promise(r => setTimeout(r, 300));
+          const ss = takeScreenshot(cn);
+          return {
+            content: [
+              { type: "image", data: ss.data, mimeType: ss.mimeType },
+              { type: "text", text: `Element disappeared after ${elapsed}s (${polls} polls)` }
+            ]
+          };
+        }
+
+        await new Promise(r => setTimeout(r, intervalMs));
+      }
+
+      // Timeout
+      const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+      const ss = takeScreenshot(cn);
+      const matchInfo = mode === "appear"
+        ? `No matching element found after ${elapsed}s (${polls} polls).`
+        : `Element still present after ${elapsed}s (${polls} polls): ${lastMatches[0]?.role} "${lastMatches[0]?.name}"`;
+
+      return {
+        content: [
+          { type: "image", data: ss.data, mimeType: ss.mimeType },
+          { type: "text", text: `Timeout: ${matchInfo}` }
+        ],
+        isError: true
+      };
+    } catch (err) {
+      return { content: [{ type: "text", text: `A11y wait error: ${err.message}` }], isError: true };
     }
   }
 );
