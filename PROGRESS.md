@@ -596,8 +596,45 @@ Two bugs found and fixed through edge case testing:
 - Server version: 1.7.0
 
 ### Next Steps
+- [x] Unicode type in GUI apps (mousepad, Firefox) → ✅ cycle 13
 - [ ] Session recording/replay
 - [ ] Keyboard shortcut helper (common shortcuts as named actions)
 - [ ] `computer_type_file` — type large content via file (bypass xdotool limits)
 - [ ] Edge case testing: large files, special filenames, symlinks
-- [ ] Unicode type in GUI apps (mousepad, Firefox) — currently uses ctrl+shift+v (terminal-focused)
+
+---
+
+## Cycle 13 (2026-03-08)
+
+### Unicode Type: GUI App Support
+The cycle 12 unicode fallback used `ctrl+shift+v` to paste from clipboard, which only works in terminal emulators. GUI apps (Mousepad, Firefox, etc.) use `ctrl+v`.
+
+**Bug**: Unicode text typed nothing in Mousepad/Firefox (ctrl+shift+v is terminal-specific)
+
+**Fix**: Auto-detect focused window type via `xdotool getactivewindow getwindowname`:
+- Terminal emulators (window name matches `terminal|xterm|rxvt|konsole|alacritty|kitty|tilix|sakura|lxterminal|terminator|urxvt`): use `ctrl+shift+v`
+- GUI apps (everything else): use `ctrl+v`
+- Falls back to `ctrl+v` if detection fails (safe default for most apps)
+
+**Note**: xdotool v3 (2016) in container lacks `getwindowclassname` — uses window title matching instead.
+
+### Verification Results
+- **Unicode in Mousepad**: ✅ "Hello 世界 café 🌍" typed and rendered correctly
+- **Unicode in Terminal**: ✅ "こんにちは世界 🎉" typed and echoed correctly
+- **Unicode in Firefox**: ✅ "搜索 中文测试 🔍" typed in URL bar, Google search suggestion appeared
+- **ASCII in Terminal**: ✅ Standard xdotool type path works
+- **ASCII in Mousepad**: ✅ "ASCII in Mousepad works too!" typed correctly
+
+### Commits
+1. `2e01c73` — fix: unicode type now works in GUI apps (mousepad, firefox, etc)
+
+### Code Stats
+- MCP server: ~1295 lines (up from ~1286)
+- 17 MCP tools (unchanged)
+- Server version: 1.7.1
+
+### Next Steps
+- [ ] Session recording/replay
+- [ ] Keyboard shortcut helper (common shortcuts as named actions)
+- [ ] `computer_type_file` — type large content via file (bypass xdotool limits)
+- [ ] Edge case testing: large files, special filenames, symlinks
