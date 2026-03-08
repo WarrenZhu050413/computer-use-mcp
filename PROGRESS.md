@@ -229,9 +229,59 @@ screenshot, left_click, right_click, double_click, triple_click, left_click_drag
 2. `e80e9f4` — fix: container auto-recovery uses full recreation instead of docker start
 
 ### Next Steps
-- [ ] Multi-container support (spawn/destroy environments on demand)
+- [x] Multi-container support (spawn/destroy environments on demand) → ✅ cycle 6
 - [ ] Resolution switching (with coordinate scaling for > 1568px)
 - [ ] `display_number` param support
+- [ ] Session recording/replay
+- [ ] File exchange helpers via /workspace
+- [ ] Browser automation helpers
+
+---
+
+## Cycle 6 (2026-03-08)
+
+### Multi-Container Support
+Major feature: spawn/destroy independent virtual desktop environments on demand.
+
+**New Tools:**
+- `computer_env_create` — creates a new Docker container with its own VNC (5901+), noVNC (6081+), workspace
+- `computer_env_destroy` — removes container, preserves workspace directory
+- `computer_env_list` — lists all managed environments with status, ports, workspace paths
+
+**Modified Tools:**
+- `computer` — new optional `container_name` param to target any environment
+- `computer_bash` — same `container_name` param
+- `computer_status` — same, plus shows VNC/noVNC/workspace info
+
+**Architecture:**
+- In-memory `environments` Map tracks name → {image, vncPort, novncPort, workspace}
+- Auto port allocation: VNC 5900+N, noVNC 6080+N
+- Default container unchanged (fully backward compatible)
+- Auto-recovery works per-container (each env has its own image/port config)
+- All core functions (dockerExec, takeScreenshot, xdotool, etc.) parameterized with containerName
+
+**Other Fixes:**
+- `hold_key` timeout now scales with duration: `(dur + 5) * 1000` instead of hardcoded 30s
+- Server version bumped to 1.1.0
+
+### Verification Results
+- **Default container**: ✅ Screenshot on primary works, backward compatible
+- **Create environment**: ✅ `test-env` created with VNC:5901, noVNC:6081, display active
+- **Actions on secondary**: ✅ left_click (open terminal), type (command), key (Return) all work on test-env
+- **List environments**: ✅ Shows both default and test-env with correct ports/status
+- **Destroy environment**: ✅ Container removed, docker ps confirms gone, workspace preserved
+
+### Commits
+1. `1f16e8f` — feat: multi-container support — spawn/destroy independent virtual desktops
+
+### Code Stats
+- MCP server: 681 lines (up from ~519)
+- 8 MCP tools total: computer, computer_bash, computer_status, computer_env_create, computer_env_destroy, computer_env_list
+
+### Next Steps
+- [ ] Resolution switching (with coordinate scaling for > 1568px)
+- [ ] `display_number` param support
+- [ ] Per-environment resolution (currently all share DISPLAY_WIDTH/HEIGHT)
 - [ ] Session recording/replay
 - [ ] File exchange helpers via /workspace
 - [ ] Browser automation helpers
