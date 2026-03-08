@@ -1632,6 +1632,26 @@ Improved clipboard paste terminal-vs-GUI detection to check X11 `WM_CLASS` prope
 
 ---
 
+## Cycle 33 (2026-03-08)
+
+### Macro Dry-Run Mode & Screenshot Performance Optimization
+
+1. **Macro dry-run mode**: `dry_run=true` in run mode lists all actions with their parameters (coordinates, text, scroll direction, duration, etc.) without executing. Shows repeat count and speed configuration in header.
+
+2. **Screenshot latency optimization**: Benchmarked 4 screenshot methods inside the container:
+   - scrot PNG: ~17-22ms (128KB)
+   - import PNG: ~37-42ms (127KB)
+   - scrot + convert JPEG: ~29-32ms (86KB)
+   - **scrot direct JPEG: ~4-6ms (92KB)** ← 6x faster
+
+   Implemented fast path: when no coordinate scaling needed (common 1024x768 case), use scrot's native JPEG output (`-q` flag) instead of scrot PNG + ImageMagick convert. Eliminates a second docker exec + convert process spawn.
+
+3. **text_editor edge case verification**: Tested view_range with end=-1 (EOF), single line [1,1], last line [20,20], out-of-range start (0 and 21), reversed range [10,5], max_characters truncation, directory listing, nonexistent path — all pass correctly with proper error messages.
+
+4. **API monitoring**: Browsed Anthropic docs in VM. Confirmed `computer_20251124` still latest, now listing Opus 4.6/Sonnet 4.6 models. No new actions or parameters. `text_editor_20250728` unchanged.
+
+**Version**: 1.26.0 | **Tools**: 34 | **Commits**: 2
+
 ## Cycle 32 (2026-03-08)
 
 ### Clipboard Paste Verification & Race Fix
