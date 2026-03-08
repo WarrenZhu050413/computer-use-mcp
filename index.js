@@ -4266,16 +4266,19 @@ Note: snapshots do NOT preserve running processes — after restore, desktop ser
         // Stop and remove current container
         try { execFileSync("docker", ["rm", "-f", cn], { timeout: 10000 }); } catch {}
 
-        // Run from snapshot image (preserves filesystem, restarts services via start.sh/entrypoint)
+        // Run from snapshot image — clean stale X11 lock files before starting
+        // docker commit captures /tmp/.X*-lock which prevents Xvfb from starting
         const envW = env.width || DISPLAY_WIDTH;
         const envH = env.height || DISPLAY_HEIGHT;
         execFileSync("docker", [
           "run", "-d", "--name", cn,
+          "--entrypoint", "/bin/bash",
           "-e", `SCREEN_RESOLUTION=${envW}x${envH}`,
           "-p", `${env.vncPort}:5900`,
           "-p", `${env.novncPort}:6080`,
           "-v", `${env.workspace}:/workspace`,
-          imageRef
+          imageRef,
+          "-c", "rm -f /tmp/.X*-lock /tmp/.X11-unix/X* && exec /start.sh"
         ], { timeout: 30000 });
 
         // Wait for display readiness
@@ -4332,7 +4335,7 @@ Note: snapshots do NOT preserve running processes — after restore, desktop ser
             let deleted = 0;
             for (const img of images) {
               try {
-                execFileSync("docker", ["rmi", img], { timeout: 10000 });
+                execFileSync("docker", ["rmi", "-f", img], { timeout: 10000 });
                 deleted++;
               } catch {}
             }
@@ -4346,7 +4349,7 @@ Note: snapshots do NOT preserve running processes — after restore, desktop ser
         let deleted = false;
         for (const tag of [cn, "latest"]) {
           try {
-            execFileSync("docker", ["rmi", `${imageName}:${tag}`], { timeout: 10000 });
+            execFileSync("docker", ["rmi", "-f", `${imageName}:${tag}`], { timeout: 10000 });
             deleted = true;
           } catch {}
         }
