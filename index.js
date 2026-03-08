@@ -4947,16 +4947,19 @@ server.tool(
     window_title: z.string().optional().describe("Filter by window title substring"),
     click_type: z.enum(["left_click", "right_click", "double_click"]).default("left_click").describe("Type of click to perform (default: left_click)"),
     index: z.number().optional().describe("If multiple elements match, click the Nth one (0-based, default 0 = first match)"),
+    ensure_visible: z.boolean().default(true).describe("Auto-scroll to bring element into view before clicking (default: true). Detects off-screen elements via 'showing' state and scrolls the viewport."),
     container_name: z.string().optional().describe("Target container (default: primary)"),
   },
-  async ({ role, name, app, window_title, click_type, index, container_name }) => {
+  async ({ role, name, app, window_title, click_type, index, ensure_visible, container_name }) => {
     const cn = container_name || DEFAULT_CONTAINER;
     try {
       if (!role && !name) {
         return { content: [{ type: "text", text: "Error: at least one of 'role' or 'name' must be specified" }], isError: true };
       }
 
-      const q = queryA11yFlat({ role, name, app, window_title, container_name: cn });
+      const q = ensure_visible
+        ? await scrollToA11yElement({ role, name, app, window_title, container_name: cn, index: index || 0 })
+        : queryA11yFlat({ role, name, app, window_title, container_name: cn });
       if (q.error) return { content: [{ type: "text", text: q.error }], isError: true };
 
       if (q.matches.length === 0) {
@@ -5039,6 +5042,61 @@ function sortByNameRelevance(matches, query) {
   return matches;
 }
 
+// ── Shared A11y scroll-into-view helper ──────────────────────────────
+// Scrolls the viewport to bring an a11y element into view. Returns the same
+// format as queryA11yFlat — drop-in replacement with scrolling.
+// Checks "showing" state to detect visibility. Scroll loop with max 10 attempts.
+async function scrollToA11yElement({ role, name, app, window_title, container_name, index = 0, depth = 20 }) {
+  const cn = container_name || DEFAULT_CONTAINER;
+  let q = queryA11yFlat({ role, name, app, window_title, container_name: cn, depth });
+  if (q.error || q.matches.length === 0) return q;
+
+  const env = environments.get(cn);
+  const dispW = env?.width || DISPLAY_WIDTH;
+  const dispH = env?.height || DISPLAY_HEIGHT;
+  const SCROLL_PX = 53; // ~pixels per scroll click in X11
+  const maxAttempts = 10;
+
+  let targetIdx = Math.min(index, q.matches.length - 1);
+  let target = q.matches[targetIdx];
+
+  if ((target.states || []).includes("showing")) return q;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const elemCenterY = target.bbox.y + target.bbox.height / 2;
+    const viewportCenterY = dispH / 2;
+    const scrollX = Math.round(dispW / 2);
+
+    let direction, pixelDist;
+    if (elemCenterY >= dispH) {
+      direction = "down"; pixelDist = elemCenterY - viewportCenterY;
+    } else if (elemCenterY + target.bbox.height < 0) {
+      direction = "up"; pixelDist = viewportCenterY - elemCenterY;
+    } else {
+      // Bbox overlaps viewport but not "showing" — small nudge
+      direction = elemCenterY > viewportCenterY ? "down" : "up";
+      pixelDist = Math.abs(elemCenterY - viewportCenterY);
+    }
+
+    if (pixelDist < 10) break; // close enough
+
+    const amount = Math.max(3, Math.min(10, Math.ceil(pixelDist / SCROLL_PX)));
+    const btn = direction === "down" ? 5 : 4;
+    xdotool(`mousemove ${scrollX} ${Math.round(viewportCenterY)} click --repeat ${amount} --delay 50 ${btn}`, cn);
+    await new Promise(r => setTimeout(r, 600));
+
+    // Re-query for fresh coordinates
+    q = queryA11yFlat({ role, name, app, window_title, container_name: cn, depth });
+    if (q.error || q.matches.length === 0) break;
+
+    targetIdx = Math.min(index, q.matches.length - 1);
+    target = q.matches[targetIdx];
+    if ((target.states || []).includes("showing")) break;
+  }
+
+  return q;
+}
+
 // ── Shared A11y query helper ──────────────────────────────────────
 function queryA11yFlat({ role, name, app, window_title, container_name, depth = 20 }) {
   const cn = container_name || DEFAULT_CONTAINER;
@@ -5092,9 +5150,10 @@ server.tool(
     app: z.string().optional().describe("Filter by application name (e.g. 'Firefox', 'xfce4-terminal')"),
     window_title: z.string().optional().describe("Filter by window title substring"),
     index: z.number().optional().describe("If multiple elements match, target the Nth one (0-based, default 0)"),
+    ensure_visible: z.boolean().default(true).describe("Auto-scroll to bring element into view before typing (default: true)."),
     container_name: z.string().optional().describe("Target container (default: primary)"),
   },
-  async ({ role, name, text, clear_first, app, window_title, index, container_name }) => {
+  async ({ role, name, text, clear_first, app, window_title, index, ensure_visible, container_name }) => {
     const cn = container_name || DEFAULT_CONTAINER;
     try {
       // Default to common text input roles if no role specified
@@ -5103,7 +5162,9 @@ server.tool(
         return { content: [{ type: "text", text: "Error: at least one of 'role' or 'name' must be specified" }], isError: true };
       }
 
-      const q = queryA11yFlat({ role: effectiveRole, name, app, window_title, container_name: cn });
+      const q = ensure_visible
+        ? await scrollToA11yElement({ role: effectiveRole, name, app, window_title, container_name: cn, index: index || 0 })
+        : queryA11yFlat({ role: effectiveRole, name, app, window_title, container_name: cn });
       if (q.error) return { content: [{ type: "text", text: q.error }], isError: true };
 
       if (q.matches.length === 0) {
@@ -5528,9 +5589,10 @@ server.tool(
     })).min(1).max(20).describe("Array of elements to select/toggle. Each needs at least 'name' or 'role'."),
     app: z.string().optional().describe("Filter by application name (e.g. 'Firefox')"),
     window_title: z.string().optional().describe("Filter by window title substring"),
+    ensure_visible: z.boolean().default(true).describe("Auto-scroll to bring each element into view before interacting (default: true)."),
     container_name: z.string().optional().describe("Target container (default: primary)"),
   },
-  async ({ elements, app, window_title, container_name }) => {
+  async ({ elements, app, window_title, ensure_visible, container_name }) => {
     const cn = container_name || DEFAULT_CONTAINER;
     try {
       // Validate elements
@@ -5541,10 +5603,10 @@ server.tool(
       }
 
       // Query full a11y tree once
-      const q = queryA11yFlat({ role: null, name: null, app, window_title, container_name: cn });
+      let q = queryA11yFlat({ role: null, name: null, app, window_title, container_name: cn });
       if (q.error) return { content: [{ type: "text", text: q.error }], isError: true };
 
-      const allNodes = q.matches;
+      let allNodes = q.matches;
       const results = [];
       const env = environments.get(cn);
       const dispW = env?.width || DISPLAY_WIDTH;
@@ -5574,8 +5636,21 @@ server.tool(
           continue;
         }
 
-        const targetIdx = Math.min(elem.index || 0, elemMatches.length - 1);
-        const target = elemMatches[targetIdx];
+        let targetIdx = Math.min(elem.index || 0, elemMatches.length - 1);
+        let target = elemMatches[targetIdx];
+
+        // Scroll element into view if needed
+        if (ensure_visible && !(target.states || []).includes("showing")) {
+          const scrollQ = await scrollToA11yElement({
+            role: elem.role || null, name: elem.name || null,
+            app, window_title, container_name: cn
+          });
+          if (!scrollQ.error && scrollQ.matches.length > 0) {
+            const freshIdx = Math.min(elem.index || 0, scrollQ.matches.length - 1);
+            target = scrollQ.matches[freshIdx];
+          }
+        }
+
         const nodeRole = (target.role || "").toLowerCase();
         const states = target.states || [];
         const isChecked = states.includes("checked");
@@ -5709,9 +5784,10 @@ server.tool(
     window_title: z.string().optional().describe("Filter by window title substring"),
     submit: z.boolean().default(false).describe("Press Enter/Return after filling the last field (e.g. to submit a form)"),
     tab_between: z.boolean().default(false).describe("Press Tab between fields instead of clicking each one. Faster but assumes tab order matches field order."),
+    ensure_visible: z.boolean().default(true).describe("Auto-scroll to bring each field into view before filling (default: true)."),
     container_name: z.string().optional().describe("Target container (default: primary)"),
   },
-  async ({ fields, app, window_title, submit, tab_between, container_name }) => {
+  async ({ fields, app, window_title, submit, tab_between, ensure_visible, container_name }) => {
     const cn = container_name || DEFAULT_CONTAINER;
     try {
       // Validate that each field has at least name or role
@@ -5751,8 +5827,20 @@ server.tool(
           continue;
         }
 
-        const targetIdx = Math.min(field.index || 0, fieldMatches.length - 1);
-        const target = fieldMatches[targetIdx];
+        let targetIdx = Math.min(field.index || 0, fieldMatches.length - 1);
+        let target = fieldMatches[targetIdx];
+
+        // Scroll field into view if needed
+        if (ensure_visible && !(target.states || []).includes("showing")) {
+          const scrollQ = await scrollToA11yElement({
+            role: field.role || null, name: field.name || null,
+            app, window_title, container_name: cn
+          });
+          if (!scrollQ.error && scrollQ.matches.length > 0) {
+            const freshIdx = Math.min(field.index || 0, scrollQ.matches.length - 1);
+            target = scrollQ.matches[freshIdx];
+          }
+        }
 
         // Click to focus (unless tab_between and not the first field)
         if (!tab_between || fi === 0) {
