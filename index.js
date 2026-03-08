@@ -99,6 +99,46 @@ function resolveContainer(name) {
   return cn;
 }
 
+// Find a window by title substring or exact window ID. Returns the window ID string.
+function findWindowByTitleOrId(title, window_id, cn) {
+  if (!title && !window_id) throw new Error("Provide either title or window_id");
+  if (window_id) return String(window_id);
+  const wids = dockerExec("xdotool search --onlyvisible --name ''", 10000, cn)
+    .toString().trim().split("\n").filter(Boolean);
+  for (const wid of wids) {
+    try {
+      const name = dockerExec(`xdotool getwindowname ${wid}`, 5000, cn).toString().trim();
+      if (name.toLowerCase().includes(title.toLowerCase())) return wid;
+    } catch { /* skip inaccessible windows */ }
+  }
+  throw new Error(`No window matching "${title}" found`);
+}
+
+// Get all visible, named windows (excludes desktop/panel). Returns [{wid, name, x, y, w, h}].
+function getVisibleWindows(cn) {
+  const wids = dockerExec("xdotool search --onlyvisible --name ''", 10000, cn)
+    .toString().trim().split("\n").filter(Boolean);
+  const windows = [];
+  const skipPatterns = ["desktop", "xfce4-panel", "xfdesktop"];
+  for (const wid of wids.slice(0, 30)) {
+    try {
+      const name = dockerExec(`xdotool getwindowname ${wid}`, 5000, cn).toString().trim();
+      if (!name || skipPatterns.some(p => name.toLowerCase().includes(p))) continue;
+      const geom = dockerExec(`xdotool getwindowgeometry ${wid}`, 5000, cn).toString().trim();
+      const posMatch = geom.match(/Position: (\d+),(\d+)/);
+      const sizeMatch = geom.match(/Geometry: (\d+)x(\d+)/);
+      if (posMatch && sizeMatch) {
+        windows.push({
+          wid, name,
+          x: parseInt(posMatch[1]), y: parseInt(posMatch[2]),
+          w: parseInt(sizeMatch[1]), h: parseInt(sizeMatch[2])
+        });
+      }
+    } catch { /* skip inaccessible */ }
+  }
+  return windows;
+}
+
 function isContainerRunning(containerName = DEFAULT_CONTAINER) {
   try {
     const status = execFileSync("docker", [
@@ -427,7 +467,7 @@ function executeAction({ action, coordinate, text, scroll_direction, scroll_amou
 
 const server = new McpServer({
   name: "computer-use",
-  version: "1.13.0",
+  version: "1.16.0",
 });
 
 const actionSchema = {
@@ -1139,26 +1179,7 @@ Use with computer_window_list to discover window IDs and titles first.`,
   async ({ title, window_id, container_name }) => {
     try {
       const cn = resolveContainer(container_name);
-      if (!title && !window_id) throw new Error("Provide either title or window_id");
-
-      let targetWid;
-      if (window_id) {
-        targetWid = String(window_id);
-      } else {
-        // Search by title substring
-        const wids = dockerExec("xdotool search --onlyvisible --name ''", 10000, cn)
-          .toString().trim().split("\n").filter(Boolean);
-        for (const wid of wids) {
-          try {
-            const name = dockerExec(`xdotool getwindowname ${wid}`, 5000, cn).toString().trim();
-            if (name.toLowerCase().includes(title.toLowerCase())) {
-              targetWid = wid;
-              break;
-            }
-          } catch { /* skip inaccessible windows */ }
-        }
-        if (!targetWid) throw new Error(`No window matching "${title}" found`);
-      }
+      const targetWid = findWindowByTitleOrId(title, window_id, cn);
 
       // Activate and focus the window
       dockerExec(`xdotool windowactivate ${targetWid}`, 10000, cn);
@@ -1196,25 +1217,7 @@ Use with computer_window_list to discover window IDs and titles.`,
   async ({ x, y, title, window_id, container_name }) => {
     try {
       const cn = resolveContainer(container_name);
-      if (!title && !window_id) throw new Error("Provide either title or window_id");
-
-      let targetWid;
-      if (window_id) {
-        targetWid = String(window_id);
-      } else {
-        const wids = dockerExec("xdotool search --onlyvisible --name ''", 10000, cn)
-          .toString().trim().split("\n").filter(Boolean);
-        for (const wid of wids) {
-          try {
-            const name = dockerExec(`xdotool getwindowname ${wid}`, 5000, cn).toString().trim();
-            if (name.toLowerCase().includes(title.toLowerCase())) {
-              targetWid = wid;
-              break;
-            }
-          } catch { /* skip inaccessible windows */ }
-        }
-        if (!targetWid) throw new Error(`No window matching "${title}" found`);
-      }
+      const targetWid = findWindowByTitleOrId(title, window_id, cn);
 
       // Convert API coordinates to display coordinates
       const [dx, dy] = apiToDisplay(x, y, cn);
@@ -1252,25 +1255,7 @@ Use with computer_window_list to discover window IDs and titles.`,
   async ({ width, height, title, window_id, container_name }) => {
     try {
       const cn = resolveContainer(container_name);
-      if (!title && !window_id) throw new Error("Provide either title or window_id");
-
-      let targetWid;
-      if (window_id) {
-        targetWid = String(window_id);
-      } else {
-        const wids = dockerExec("xdotool search --onlyvisible --name ''", 10000, cn)
-          .toString().trim().split("\n").filter(Boolean);
-        for (const wid of wids) {
-          try {
-            const name = dockerExec(`xdotool getwindowname ${wid}`, 5000, cn).toString().trim();
-            if (name.toLowerCase().includes(title.toLowerCase())) {
-              targetWid = wid;
-              break;
-            }
-          } catch { /* skip inaccessible windows */ }
-        }
-        if (!targetWid) throw new Error(`No window matching "${title}" found`);
-      }
+      const targetWid = findWindowByTitleOrId(title, window_id, cn);
 
       // Convert API dimensions to display dimensions
       const [dw, dh] = apiToDisplay(width, height, cn);
@@ -1307,25 +1292,7 @@ Use with computer_window_list to discover window IDs and titles.`,
   async ({ action, title, window_id, container_name }) => {
     try {
       const cn = resolveContainer(container_name);
-      if (!title && !window_id) throw new Error("Provide either title or window_id");
-
-      let targetWid;
-      if (window_id) {
-        targetWid = String(window_id);
-      } else {
-        const wids = dockerExec("xdotool search --onlyvisible --name ''", 10000, cn)
-          .toString().trim().split("\n").filter(Boolean);
-        for (const wid of wids) {
-          try {
-            const name = dockerExec(`xdotool getwindowname ${wid}`, 5000, cn).toString().trim();
-            if (name.toLowerCase().includes(title.toLowerCase())) {
-              targetWid = wid;
-              break;
-            }
-          } catch { /* skip inaccessible windows */ }
-        }
-        if (!targetWid) throw new Error(`No window matching "${title}" found`);
-      }
+      const targetWid = findWindowByTitleOrId(title, window_id, cn);
 
       let resultText;
       switch (action) {
@@ -1376,6 +1343,129 @@ Use with computer_window_list to discover window IDs and titles.`,
       };
     } catch (err) {
       return { content: [{ type: "text", text: `Window manage error: ${err.message}` }], isError: true };
+    }
+  }
+);
+
+// === Window Tile Tool ===
+
+server.tool(
+  "computer_window_tile",
+  `Auto-arrange visible windows in a tiling layout. Layouts:
+- left_right: 2 windows side by side (50/50)
+- top_bottom: 2 windows stacked (50/50)
+- grid: auto-grid (fills NxM grid based on window count)
+- cascade: offset windows diagonally (30px step)
+- thirds: 3 windows in equal vertical thirds
+Provide titles array to select specific windows, or omit to tile all visible app windows.`,
+  {
+    layout: z.enum(["left_right", "top_bottom", "grid", "cascade", "thirds"]).describe("Tiling layout preset"),
+    titles: z.array(z.string()).optional().describe("Window title substrings to include (in order). Omit to tile all visible windows."),
+    gap: z.number().optional().describe("Gap in pixels between windows (default: 0)"),
+    container_name: z.string().optional().describe("Target container (default: primary)"),
+  },
+  async ({ layout, titles, gap = 0, container_name }) => {
+    try {
+      const cn = resolveContainer(container_name);
+      const env = environments.get(cn);
+      const screenW = env?.width || DISPLAY_WIDTH;
+      const screenH = env?.height || DISPLAY_HEIGHT;
+
+      // Get windows to tile
+      let windows;
+      if (titles && titles.length > 0) {
+        windows = [];
+        for (const t of titles) {
+          try {
+            const wid = findWindowByTitleOrId(t, undefined, cn);
+            const name = dockerExec(`xdotool getwindowname ${wid}`, 5000, cn).toString().trim();
+            windows.push({ wid, name });
+          } catch { /* skip unfound windows */ }
+        }
+      } else {
+        windows = getVisibleWindows(cn);
+      }
+
+      if (windows.length === 0) throw new Error("No windows found to tile");
+
+      // Compute slots based on layout
+      const slots = [];
+      const n = windows.length;
+      const g = gap;
+
+      switch (layout) {
+        case "left_right": {
+          const count = Math.min(n, 2);
+          const w = Math.floor((screenW - g * (count - 1)) / count);
+          for (let i = 0; i < count; i++) {
+            slots.push({ x: i * (w + g), y: 0, w, h: screenH });
+          }
+          break;
+        }
+        case "top_bottom": {
+          const count = Math.min(n, 2);
+          const h = Math.floor((screenH - g * (count - 1)) / count);
+          for (let i = 0; i < count; i++) {
+            slots.push({ x: 0, y: i * (h + g), w: screenW, h });
+          }
+          break;
+        }
+        case "grid": {
+          const cols = Math.ceil(Math.sqrt(n));
+          const rows = Math.ceil(n / cols);
+          const cellW = Math.floor((screenW - g * (cols - 1)) / cols);
+          const cellH = Math.floor((screenH - g * (rows - 1)) / rows);
+          for (let i = 0; i < n; i++) {
+            const col = i % cols;
+            const row = Math.floor(i / cols);
+            slots.push({ x: col * (cellW + g), y: row * (cellH + g), w: cellW, h: cellH });
+          }
+          break;
+        }
+        case "cascade": {
+          const step = 30;
+          const baseW = Math.floor(screenW * 0.7);
+          const baseH = Math.floor(screenH * 0.7);
+          for (let i = 0; i < n; i++) {
+            slots.push({ x: i * step, y: i * step, w: baseW, h: baseH });
+          }
+          break;
+        }
+        case "thirds": {
+          const count = Math.min(n, 3);
+          const w = Math.floor((screenW - g * (count - 1)) / count);
+          for (let i = 0; i < count; i++) {
+            slots.push({ x: i * (w + g), y: 0, w, h: screenH });
+          }
+          break;
+        }
+      }
+
+      // Apply layout: move + resize each window to its slot
+      const results = [];
+      for (let i = 0; i < Math.min(windows.length, slots.length); i++) {
+        const win = windows[i];
+        const slot = slots[i];
+        try {
+          dockerExec(`xdotool windowactivate ${win.wid}`, 10000, cn);
+          dockerExec(`xdotool windowsize ${win.wid} ${slot.w} ${slot.h}`, 10000, cn);
+          dockerExec(`xdotool windowmove ${win.wid} ${slot.x} ${slot.y}`, 10000, cn);
+          results.push(`${win.name}: ${slot.w}x${slot.h} at (${slot.x},${slot.y})`);
+        } catch (e) {
+          results.push(`${win.name}: FAILED — ${e.message}`);
+        }
+      }
+
+      await new Promise(r => setTimeout(r, SCREENSHOT_DELAY_MS));
+      const ss = takeScreenshot(cn);
+      return {
+        content: [
+          { type: "image", data: ss.data, mimeType: ss.mimeType },
+          { type: "text", text: `Tiled ${Math.min(windows.length, slots.length)} windows (${layout}):\n${results.join("\n")}` }
+        ]
+      };
+    } catch (err) {
+      return { content: [{ type: "text", text: `Window tile error: ${err.message}` }], isError: true };
     }
   }
 );
