@@ -5340,24 +5340,20 @@ server.tool(
 
         if (include_url) {
           if (urlMode === "all" && result.tabs.length > 1) {
-            // Read URLs for ALL tabs: remember active, iterate each, switch back
+            // Read URLs for ALL tabs: click each, read URL bar, switch back to original
             const activeTab = result.tabs.find(t => t.active);
-            const activeIdx = activeTab ? activeTab.index : 0;
 
             for (const tab of result.tabs) {
-              if (!tab.active) {
-                clickTab(tab);
-                await new Promise(r => setTimeout(r, 500));
-              }
+              clickTab(tab);
+              await new Promise(r => setTimeout(r, 500));
               const tabUrl = getActiveTabUrl();
               if (tabUrl) tabUrls.set(tab.index, tabUrl);
             }
 
             // Switch back to originally active tab
-            if (activeTab && !result.tabs[result.tabs.length - 1].active) {
-              // We ended on the last tab we iterated; switch back if different
-              const finalTab = result.tabs[result.tabs.length - 1];
-              if (finalTab.index !== activeIdx) {
+            if (activeTab) {
+              const lastTab = result.tabs[result.tabs.length - 1];
+              if (lastTab.index !== activeTab.index) {
                 clickTab(activeTab);
                 await new Promise(r => setTimeout(r, 500));
               }
