@@ -4,7 +4,8 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { execFileSync } from "child_process";
 import { randomUUID } from "crypto";
-import { mkdirSync } from "fs";
+import { mkdirSync, readFileSync, writeFileSync, existsSync } from "fs";
+import { basename, extname } from "path";
 
 // Default configuration (from environment)
 const DEFAULT_CONTAINER = process.env.CONTAINER_NAME || "computer-use";
@@ -17,6 +18,7 @@ const DISPLAY_HEIGHT = parseInt(process.env.DISPLAY_HEIGHT || "768", 10);
 const SCREENSHOT_DELAY_MS = parseInt(process.env.SCREENSHOT_DELAY_MS || "1000", 10);
 const SCREENSHOT_FORMAT = (process.env.SCREENSHOT_FORMAT || "jpeg").toLowerCase();
 const SCREENSHOT_QUALITY = parseInt(process.env.SCREENSHOT_QUALITY || "80", 10);
+const DEFAULT_DISPLAY_NUMBER = parseInt(process.env.DISPLAY_NUMBER || "1", 10);
 const TYPING_DELAY_MS = 12;
 const MAX_RESPONSE_LEN = 16000;
 const MAX_API_DIMENSION = 1568; // Anthropic spec: max longest edge in API space
@@ -33,6 +35,7 @@ environments.set(DEFAULT_CONTAINER, {
   workspace: DEFAULT_WORKSPACE,
   width: DISPLAY_WIDTH,
   height: DISPLAY_HEIGHT,
+  displayNumber: DEFAULT_DISPLAY_NUMBER,
 });
 
 // === Coordinate scaling (Anthropic spec: max 1568px on longest edge) ===
@@ -94,10 +97,11 @@ function restartContainer(containerName = DEFAULT_CONTAINER) {
       env.image
     ], { timeout: 30000 });
     // Wait for display to come up
+    const dn = env.displayNumber || DEFAULT_DISPLAY_NUMBER;
     for (let i = 0; i < 15; i++) {
       try {
         execFileSync("docker", [
-          "exec", containerName, "bash", "-c", "DISPLAY=:1 xdotool getdisplaygeometry"
+          "exec", containerName, "bash", "-c", `DISPLAY=:${dn} xdotool getdisplaygeometry`
         ], { timeout: 5000 });
         return true;
       } catch { /* display not ready yet */ }
@@ -107,17 +111,23 @@ function restartContainer(containerName = DEFAULT_CONTAINER) {
   return false;
 }
 
+function getDisplayNumber(containerName = DEFAULT_CONTAINER) {
+  const env = environments.get(containerName);
+  return env?.displayNumber || DEFAULT_DISPLAY_NUMBER;
+}
+
 function dockerExec(cmd, timeoutMs = 30000, containerName = DEFAULT_CONTAINER) {
+  const dn = getDisplayNumber(containerName);
   try {
     return execFileSync("docker", [
-      "exec", containerName, "bash", "-c", `DISPLAY=:1 ${cmd}`
+      "exec", containerName, "bash", "-c", `DISPLAY=:${dn} ${cmd}`
     ], { timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 });
   } catch (err) {
     // If container is down, attempt auto-recovery (single retry)
     if (!isContainerRunning(containerName)) {
       if (restartContainer(containerName)) {
         return execFileSync("docker", [
-          "exec", containerName, "bash", "-c", `DISPLAY=:1 ${cmd}`
+          "exec", containerName, "bash", "-c", `DISPLAY=:${dn} ${cmd}`
         ], { timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 });
       }
       throw new Error(`Container '${containerName}' is not running and auto-restart failed. Original: ${err.message}`);
@@ -353,7 +363,7 @@ function executeAction({ action, coordinate, text, scroll_direction, scroll_amou
 
 const server = new McpServer({
   name: "computer-use",
-  version: "1.2.0",
+  version: "1.3.0",
 });
 
 const actionSchema = {
@@ -636,7 +646,7 @@ server.tool(
     try { mkdirSync(workspace, { recursive: true }); } catch {}
 
     // Register before starting so restartContainer can find the config
-    environments.set(envName, { image: envImage, vncPort, novncPort, workspace, width: envWidth, height: envHeight });
+    environments.set(envName, { image: envImage, vncPort, novncPort, workspace, width: envWidth, height: envHeight, displayNumber: DEFAULT_DISPLAY_NUMBER });
 
     try {
       execFileSync("docker", [
@@ -649,11 +659,12 @@ server.tool(
       ], { timeout: 30000 });
 
       // Wait for display readiness
+      const envDn = environments.get(envName)?.displayNumber || DEFAULT_DISPLAY_NUMBER;
       let ready = false;
       for (let i = 0; i < 15; i++) {
         try {
           execFileSync("docker", [
-            "exec", envName, "bash", "-c", "DISPLAY=:1 xdotool getdisplaygeometry"
+            "exec", envName, "bash", "-c", `DISPLAY=:${envDn} xdotool getdisplaygeometry`
           ], { timeout: 5000 });
           ready = true;
           break;
@@ -741,16 +752,17 @@ server.tool(
     try {
       // Kill Xvfb and x11vnc, restart with new resolution
       // Kill commands may return non-zero (143/SIGTERM propagation) — catch and continue
-      try { dockerExec(`pkill -f 'Xvfb :1' || true; exit 0`, 10000, cn); } catch {}
+      const dn = getDisplayNumber(cn);
+      try { dockerExec(`pkill -f 'Xvfb :${dn}' || true; exit 0`, 10000, cn); } catch {}
       try { dockerExec(`pkill x11vnc || true; exit 0`, 10000, cn); } catch {}
       await new Promise(r => setTimeout(r, 1500));
 
       // Start new Xvfb with requested resolution (nohup + & to background)
-      dockerExec(`nohup Xvfb :1 -screen 0 ${width}x${height}x24 +extension GLX +render -noreset > /dev/null 2>&1 &`, 10000, cn);
+      dockerExec(`nohup Xvfb :${dn} -screen 0 ${width}x${height}x24 +extension GLX +render -noreset > /dev/null 2>&1 &`, 10000, cn);
       await new Promise(r => setTimeout(r, 2000));
 
       // Restart x11vnc
-      dockerExec(`nohup x11vnc -display :1 -forever -passwd secret -noxdamage -shared -rfbport 5900 -noscr > /dev/null 2>&1 &`, 10000, cn);
+      dockerExec(`nohup x11vnc -display :${dn} -forever -passwd secret -noxdamage -shared -rfbport 5900 -noscr > /dev/null 2>&1 &`, 10000, cn);
       await new Promise(r => setTimeout(r, 1000));
 
       // Restart XFCE desktop (killed when Xvfb died)
@@ -780,6 +792,134 @@ server.tool(
     } catch (err) {
       return {
         content: [{ type: "text", text: `Failed to resize: ${err.message}` }],
+        isError: true
+      };
+    }
+  }
+);
+
+// === File exchange tools ===
+
+server.tool(
+  "computer_file_read",
+  "Read a file from a computer-use container. Returns text content or base64-encoded data for binary files. Useful for extracting screenshots, logs, or any file from the VM.",
+  {
+    path: z.string().describe("Absolute path to the file inside the container (e.g. /workspace/output.txt, /home/agent/screenshot.png)"),
+    encoding: z.enum(["text", "base64"]).optional().describe("How to return the file content: 'text' for UTF-8 text (default), 'base64' for binary files"),
+    container_name: z.string().optional().describe("Target container (default: primary)"),
+  },
+  async ({ path, encoding, container_name }) => {
+    try {
+      const cn = resolveContainer(container_name);
+      const enc = encoding || "text";
+
+      // Check file exists and get size
+      const stat = dockerExec(`stat -c '%s %F' '${path.replace(/'/g, "'\\''")}'`, 10000, cn).toString().trim();
+      const [sizeStr, fileType] = stat.split(" ", 2);
+      const size = parseInt(sizeStr, 10);
+
+      if (fileType?.includes("directory")) {
+        // If it's a directory, list contents instead
+        const listing = dockerExec(`ls -la '${path.replace(/'/g, "'\\''")}'`, 10000, cn).toString();
+        return { content: [{ type: "text", text: listing }] };
+      }
+
+      const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
+      if (size > MAX_FILE_SIZE) {
+        return {
+          content: [{ type: "text", text: `File too large: ${size} bytes (max ${MAX_FILE_SIZE}). Use computer_bash to process it first.` }],
+          isError: true
+        };
+      }
+
+      if (enc === "base64") {
+        const b64 = dockerExec(`base64 '${path.replace(/'/g, "'\\''")}'`, 60000, cn).toString().replace(/\s/g, "");
+        // Detect mime type from extension
+        const ext = path.split(".").pop()?.toLowerCase() || "";
+        const mimeMap = {
+          png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp",
+          svg: "image/svg+xml", pdf: "application/pdf", zip: "application/zip", tar: "application/x-tar",
+          gz: "application/gzip", mp4: "video/mp4", mp3: "audio/mpeg", wav: "audio/wav",
+        };
+        const mime = mimeMap[ext] || "application/octet-stream";
+        // Return image types as image content, others as text with base64
+        if (mime.startsWith("image/")) {
+          return {
+            content: [
+              { type: "image", data: b64, mimeType: mime },
+              { type: "text", text: `File: ${path} (${size} bytes, ${mime})` }
+            ]
+          };
+        }
+        return {
+          content: [{ type: "text", text: `File: ${path} (${size} bytes, ${mime})\nBase64:\n${b64}` }]
+        };
+      }
+
+      // Text mode
+      let text = dockerExec(`cat '${path.replace(/'/g, "'\\''")}'`, 60000, cn).toString();
+      if (text.length > MAX_RESPONSE_LEN) {
+        text = text.slice(0, MAX_RESPONSE_LEN) + `\n... (truncated at ${MAX_RESPONSE_LEN} chars, ${size} bytes total)`;
+      }
+      return { content: [{ type: "text", text: text || "(empty file)" }] };
+
+    } catch (err) {
+      return {
+        content: [{ type: "text", text: `Error reading file: ${err.stderr?.toString() || err.message}` }],
+        isError: true
+      };
+    }
+  }
+);
+
+server.tool(
+  "computer_file_write",
+  "Write content to a file inside a computer-use container. Supports text and base64-encoded binary data. Creates parent directories automatically.",
+  {
+    path: z.string().describe("Absolute path for the file inside the container (e.g. /workspace/input.txt)"),
+    content: z.string().describe("File content: plain text (default) or base64-encoded string (set encoding='base64')"),
+    encoding: z.enum(["text", "base64"]).optional().describe("Content encoding: 'text' (default) or 'base64' for binary data"),
+    container_name: z.string().optional().describe("Target container (default: primary)"),
+  },
+  async ({ path: filePath, content, encoding, container_name }) => {
+    try {
+      const cn = resolveContainer(container_name);
+      const enc = encoding || "text";
+      const safePath = filePath.replace(/'/g, "'\\''");
+
+      // Create parent directory
+      const dir = filePath.substring(0, filePath.lastIndexOf("/"));
+      if (dir) {
+        dockerExec(`mkdir -p '${dir.replace(/'/g, "'\\''")}'`, 10000, cn);
+      }
+
+      if (enc === "base64") {
+        // Content is already base64 — write to temp file in chunks, then decode
+        const id = randomUUID().slice(0, 8);
+        const tmpPath = `/tmp/_fw_${id}.b64`;
+        // base64 chars (A-Za-z0-9+/=) are shell-safe, can pass through echo directly
+        const CHUNK = 65536;
+        dockerExec(`true > '${tmpPath}'`, 10000, cn);
+        for (let i = 0; i < content.length; i += CHUNK) {
+          const chunk = content.slice(i, i + CHUNK);
+          dockerExec(`echo -n '${chunk}' >> '${tmpPath}'`, 30000, cn);
+        }
+        dockerExec(`base64 -d '${tmpPath}' > '${safePath}' && rm -f '${tmpPath}'`, 30000, cn);
+      } else {
+        // Text mode: write via base64 to avoid shell escaping issues
+        const b64 = Buffer.from(content).toString("base64");
+        dockerExec(`echo '${b64}' | base64 -d > '${safePath}'`, 30000, cn);
+      }
+
+      // Verify
+      const stat = dockerExec(`stat -c '%s' '${safePath}'`, 10000, cn).toString().trim();
+      return {
+        content: [{ type: "text", text: `Written: ${filePath} (${stat} bytes)` }]
+      };
+
+    } catch (err) {
+      return {
+        content: [{ type: "text", text: `Error writing file: ${err.stderr?.toString() || err.message}` }],
         isError: true
       };
     }
