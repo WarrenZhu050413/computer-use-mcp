@@ -5171,7 +5171,7 @@ server.tool(
 
       // Build a11y query — include text if requested
       let cmd = `python3 /usr/local/bin/a11y_tree.py --compact --flat --depth 20`;
-      if (include_text) cmd += " --include-text";
+      if (!include_text) cmd += " --no-text";
       if (app) {
         cmd += ` --app '${app.replace(/'/g, "'\\''")}'`;
       } else if (window_title) {
