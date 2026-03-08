@@ -2672,13 +2672,14 @@ Optionally auto-clicks the found text.`,
 // === computer_screenshot_diff — visual comparison with named baselines ===
 server.tool(
   "computer_screenshot_diff",
-  `Compare screenshots to detect visual differences. Three modes:
+  `Compare screenshots to detect visual differences. Four modes:
 - "save": Save current screenshot as a named baseline for later comparison.
 - "compare": Compare current screenshot to a saved baseline. Returns a visual diff image, difference percentage, and bounding box of changed region.
 - "list": List all saved baselines with their dimensions and timestamps.
+- "delete": Delete a saved baseline by name, or all baselines with name="all".
 Baselines are stored inside the container at /workspace/.baselines/. Useful for visual regression testing, monitoring UI changes, or verifying that actions produced expected results.`,
   {
-    mode: z.enum(["save", "compare", "list"]).describe("'save' = capture baseline, 'compare' = diff against baseline, 'list' = show saved baselines"),
+    mode: z.enum(["save", "compare", "list", "delete"]).describe("'save' = capture baseline, 'compare' = diff against baseline, 'list' = show saved baselines, 'delete' = remove baseline"),
     name: z.string().optional().describe("Baseline name (required for save/compare). Alphanumeric, dashes, underscores only."),
     region: z.array(z.number()).optional().describe("[x1, y1, x2, y2] — compare only this region (API coordinates). Omit for full screen."),
     fuzz: z.number().min(0).max(100).default(5).describe("Color difference threshold percentage (0=exact, 100=all match). Default 5 — ignores minor compression artifacts."),
@@ -2716,6 +2717,32 @@ Baselines are stored inside the container at /workspace/.baselines/. Useful for 
         } catch (err) {
           return { content: [{ type: "text", text: `List error: ${err.message}` }], isError: true };
         }
+      }
+
+      if (mode === "delete") {
+        if (!name) {
+          return { content: [{ type: "text", text: "Error: 'name' is required for delete mode. Use name='all' to delete all baselines." }], isError: true };
+        }
+        if (name === "all") {
+          try {
+            const count = dockerExec(`ls ${baselineDir}/*.png 2>/dev/null | wc -l`, 5000, cn).toString().trim();
+            dockerExec(`rm -f ${baselineDir}/*.png`, 10000, cn);
+            return { content: [{ type: "text", text: `Deleted all baselines (${count} files)` }] };
+          } catch {
+            return { content: [{ type: "text", text: "No baselines to delete" }] };
+          }
+        }
+        if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
+          return { content: [{ type: "text", text: "Error: name must be alphanumeric with dashes/underscores only" }], isError: true };
+        }
+        const delPath = `${baselineDir}/${name}.png`;
+        try {
+          dockerExec(`test -f '${delPath}'`, 5000, cn);
+        } catch {
+          return { content: [{ type: "text", text: `Baseline '${name}' not found` }], isError: true };
+        }
+        dockerExec(`rm -f '${delPath}'`, 5000, cn);
+        return { content: [{ type: "text", text: `Baseline '${name}' deleted` }] };
       }
 
       // save and compare require name
@@ -2935,6 +2962,255 @@ Reads the file, sets the clipboard, pastes with the correct shortcut (auto-detec
       };
     } catch (err) {
       return { content: [{ type: "text", text: `Type-file error: ${err.message}` }], isError: true };
+    }
+  }
+);
+
+// === computer_macro — define and replay named action sequences ===
+server.tool(
+  "computer_macro",
+  `Define, run, list, or delete reusable named action sequences (macros).
+Macros are named sequences of computer actions that can be replayed on demand — like keyboard macros but for the full desktop.
+- "save": Define a macro from a JSON array of actions, or convert a session recording into a macro.
+- "run": Execute a saved macro. Supports repeat count and speed multiplier.
+- "list": Show all saved macros with action counts.
+- "delete": Remove a macro by name, or all macros with name="all".
+Macros are stored in /workspace/.macros/ as JSON files.
+Actions format: [{"action":"key","text":"ctrl+t"},{"action":"type","text":"example.com"},{"action":"key","text":"Return"}]`,
+  {
+    mode: z.enum(["save", "run", "list", "delete"]).describe("Operation mode"),
+    name: z.string().optional().describe("Macro name (required for save/run/delete). Alphanumeric, dashes, underscores only."),
+    actions: z.string().optional().describe("JSON array of actions for 'save' mode. Each action: {action, coordinate?, text?, scroll_direction?, scroll_amount?, start_coordinate?, duration?}"),
+    from_session: z.string().optional().describe("Convert a saved session into a macro (session name). Alternative to 'actions' for save mode."),
+    repeat: z.number().optional().describe("Number of times to run the macro (default: 1). For 'run' mode."),
+    speed: z.number().optional().describe("Playback speed multiplier (default: 1.0). For 'run' mode."),
+    delay_between: z.number().optional().describe("Seconds to wait between repetitions when repeat > 1 (default: 0.5)"),
+    container_name: z.string().optional().describe("Target container (default: primary)"),
+  },
+  async ({ mode, name, actions, from_session, repeat, speed, delay_between, container_name }) => {
+    try {
+      const cn = resolveContainer(container_name);
+      const macroDir = "/workspace/.macros";
+
+      // Ensure macros directory exists
+      try { dockerExec(`mkdir -p ${macroDir}`, 5000, cn); } catch {}
+
+      if (mode === "list") {
+        try {
+          const listing = dockerExec(`ls ${macroDir}/*.json 2>/dev/null || echo "(none)"`, 10000, cn).toString().trim();
+          if (listing === "(none)") {
+            return { content: [{ type: "text", text: "No macros saved yet. Use mode='save' to create one." }] };
+          }
+          const files = listing.split("\n").filter(Boolean);
+          const details = files.map(f => {
+            const fname = f.split("/").pop().replace(".json", "");
+            let info = "";
+            try {
+              const raw = dockerExec(`cat '${f}'`, 10000, cn).toString();
+              const data = JSON.parse(raw);
+              const count = (data.actions || []).length;
+              const desc = data.description || "";
+              info = `${count} actions${desc ? ` — ${desc}` : ""}`;
+            } catch { info = "error reading"; }
+            return `  ${fname}: ${info}`;
+          });
+          return { content: [{ type: "text", text: `Saved macros (${files.length}):\n${details.join("\n")}` }] };
+        } catch (err) {
+          return { content: [{ type: "text", text: `List error: ${err.message}` }], isError: true };
+        }
+      }
+
+      if (mode === "delete") {
+        if (!name) {
+          return { content: [{ type: "text", text: "Error: 'name' is required for delete mode. Use name='all' to delete all macros." }], isError: true };
+        }
+        if (name === "all") {
+          try {
+            const count = dockerExec(`ls ${macroDir}/*.json 2>/dev/null | wc -l`, 5000, cn).toString().trim();
+            dockerExec(`rm -f ${macroDir}/*.json`, 10000, cn);
+            return { content: [{ type: "text", text: `Deleted all macros (${count} files)` }] };
+          } catch {
+            return { content: [{ type: "text", text: "No macros to delete" }] };
+          }
+        }
+        if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
+          return { content: [{ type: "text", text: "Error: name must be alphanumeric with dashes/underscores only" }], isError: true };
+        }
+        const delPath = `${macroDir}/${name}.json`;
+        try {
+          dockerExec(`test -f '${delPath}'`, 5000, cn);
+        } catch {
+          return { content: [{ type: "text", text: `Macro '${name}' not found` }], isError: true };
+        }
+        dockerExec(`rm -f '${delPath}'`, 5000, cn);
+        return { content: [{ type: "text", text: `Macro '${name}' deleted` }] };
+      }
+
+      // save and run require name
+      if (!name) {
+        return { content: [{ type: "text", text: `Error: 'name' is required for ${mode} mode` }], isError: true };
+      }
+      if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
+        return { content: [{ type: "text", text: "Error: name must be alphanumeric with dashes/underscores only" }], isError: true };
+      }
+
+      const macroPath = `${macroDir}/${name}.json`;
+
+      if (mode === "save") {
+        let parsedActions;
+
+        if (from_session) {
+          // Load from a saved session file
+          const env = environments.get(cn);
+          const workspace = env?.workspace || DEFAULT_WORKSPACE;
+          const sessionPath = `${workspace}/sessions/${from_session}.json`;
+          try {
+            if (!existsSync(sessionPath)) {
+              return { content: [{ type: "text", text: `Session '${from_session}' not found at ${sessionPath}` }], isError: true };
+            }
+            const sessionData = JSON.parse(readFileSync(sessionPath, "utf-8"));
+            parsedActions = (sessionData.actions || []).map(a => {
+              // Strip timing and screenshot data, keep just the action params
+              const { action, coordinate, text, scroll_direction, scroll_amount, start_coordinate, duration, region } = a;
+              const clean = { action };
+              if (coordinate) clean.coordinate = coordinate;
+              if (text !== undefined) clean.text = text;
+              if (scroll_direction) clean.scroll_direction = scroll_direction;
+              if (scroll_amount !== undefined) clean.scroll_amount = scroll_amount;
+              if (start_coordinate) clean.start_coordinate = start_coordinate;
+              if (duration !== undefined) clean.duration = duration;
+              if (region) clean.region = region;
+              return clean;
+            });
+          } catch (err) {
+            return { content: [{ type: "text", text: `Failed to load session: ${err.message}` }], isError: true };
+          }
+        } else if (actions) {
+          // Parse actions from JSON string
+          try {
+            parsedActions = JSON.parse(actions);
+            if (!Array.isArray(parsedActions)) {
+              return { content: [{ type: "text", text: "Error: 'actions' must be a JSON array" }], isError: true };
+            }
+          } catch (err) {
+            return { content: [{ type: "text", text: `Error parsing actions JSON: ${err.message}` }], isError: true };
+          }
+        } else {
+          return { content: [{ type: "text", text: "Error: provide 'actions' (JSON array) or 'from_session' (session name) for save mode" }], isError: true };
+        }
+
+        // Validate each action has a valid 'action' field
+        const validActions = ["screenshot", "left_click", "right_click", "middle_click", "double_click",
+          "triple_click", "left_click_drag", "type", "key", "mouse_move", "scroll",
+          "left_mouse_down", "left_mouse_up", "hold_key", "wait", "zoom", "cursor_position"];
+        for (let i = 0; i < parsedActions.length; i++) {
+          const a = parsedActions[i];
+          if (!a.action || !validActions.includes(a.action)) {
+            return { content: [{ type: "text", text: `Error: action[${i}] has invalid action '${a.action}'. Valid: ${validActions.join(", ")}` }], isError: true };
+          }
+        }
+
+        if (parsedActions.length === 0) {
+          return { content: [{ type: "text", text: "Error: macro must have at least one action" }], isError: true };
+        }
+
+        // Build macro description from action types
+        const actionCounts = {};
+        for (const a of parsedActions) {
+          actionCounts[a.action] = (actionCounts[a.action] || 0) + 1;
+        }
+        const desc = Object.entries(actionCounts).map(([k, v]) => `${v}x ${k}`).join(", ");
+
+        const macroData = {
+          name,
+          description: desc,
+          created: new Date().toISOString(),
+          action_count: parsedActions.length,
+          source: from_session ? `session:${from_session}` : "manual",
+          actions: parsedActions,
+        };
+
+        // Write macro file to container
+        const tmpPath = `/tmp/_macro_${randomUUID().slice(0, 8)}.json`;
+        const macroJson = JSON.stringify(macroData, null, 2);
+        // Write via base64 to avoid shell escaping issues
+        const b64 = Buffer.from(macroJson).toString("base64");
+        dockerExec(`echo '${b64}' | base64 -d > '${tmpPath}' && mv '${tmpPath}' '${macroPath}'`, 10000, cn);
+
+        return {
+          content: [{ type: "text", text: `Macro '${name}' saved (${parsedActions.length} actions: ${desc})${from_session ? ` [from session '${from_session}']` : ""}\nRun with: computer_macro(mode="run", name="${name}")` }]
+        };
+      }
+
+      if (mode === "run") {
+        // Load macro
+        let macroData;
+        try {
+          const raw = dockerExec(`cat '${macroPath}'`, 10000, cn).toString();
+          macroData = JSON.parse(raw);
+        } catch {
+          // List available macros
+          let available = "";
+          try {
+            available = dockerExec(`ls ${macroDir}/*.json 2>/dev/null | xargs -I{} basename {} .json`, 5000, cn).toString().trim().split("\n").filter(Boolean).join(", ");
+          } catch {}
+          return { content: [{ type: "text", text: `Macro '${name}' not found${available ? `. Available: ${available}` : ""}` }], isError: true };
+        }
+
+        const macroActions = macroData.actions || [];
+        if (macroActions.length === 0) {
+          return { content: [{ type: "text", text: `Macro '${name}' has no actions` }] };
+        }
+
+        const repeatCount = Math.max(1, Math.min(repeat || 1, 100));
+        const playbackSpeed = Math.max(0.1, Math.min(speed || 1.0, 10.0));
+        const delayMs = Math.max(0, (delay_between || 0.5) * 1000);
+        let totalExecuted = 0;
+        let errors = [];
+
+        for (let rep = 0; rep < repeatCount; rep++) {
+          for (let i = 0; i < macroActions.length; i++) {
+            const a = macroActions[i];
+            try {
+              executeAction(a, cn);
+              totalExecuted++;
+
+              // Wait between actions (scaled by speed)
+              const actionDelay = Math.round(SCREENSHOT_DELAY_MS / playbackSpeed);
+              if (i < macroActions.length - 1) {
+                await new Promise(r => setTimeout(r, actionDelay));
+              }
+            } catch (err) {
+              errors.push(`rep${rep + 1}:action${i + 1}(${a.action}): ${err.message}`);
+            }
+          }
+
+          // Delay between repetitions
+          if (rep < repeatCount - 1 && delayMs > 0) {
+            await new Promise(r => setTimeout(r, Math.round(delayMs / playbackSpeed)));
+          }
+        }
+
+        // Take final screenshot
+        await new Promise(r => setTimeout(r, SCREENSHOT_DELAY_MS));
+        const ss = takeScreenshot(cn);
+
+        let summary = `Macro '${name}' completed: ${totalExecuted}/${macroActions.length * repeatCount} actions executed`;
+        if (repeatCount > 1) summary += ` (${repeatCount} repetitions)`;
+        if (playbackSpeed !== 1.0) summary += ` at ${playbackSpeed}x speed`;
+        if (errors.length > 0) summary += `\nErrors (${errors.length}):\n  ${errors.slice(0, 10).join("\n  ")}`;
+
+        return {
+          content: [
+            { type: "image", data: ss.data, mimeType: ss.mimeType },
+            { type: "text", text: summary }
+          ]
+        };
+      }
+
+      return { content: [{ type: "text", text: `Unknown mode: ${mode}` }], isError: true };
+    } catch (err) {
+      return { content: [{ type: "text", text: `Macro error: ${err.message}` }], isError: true };
     }
   }
 );
