@@ -363,7 +363,7 @@ function executeAction({ action, coordinate, text, scroll_direction, scroll_amou
 
 const server = new McpServer({
   name: "computer-use",
-  version: "1.4.0",
+  version: "1.5.0",
 });
 
 const actionSchema = {
@@ -1007,6 +1007,102 @@ server.tool(
     } catch (err) {
       return {
         content: [{ type: "text", text: `Window list error: ${err.stderr?.toString() || err.message}` }],
+        isError: true
+      };
+    }
+  }
+);
+
+server.tool(
+  "computer_process_list",
+  "List running processes inside a computer-use container. Returns a process table (PID, CPU%, MEM%, command). Useful for debugging, finding stuck processes, or checking what's running.",
+  {
+    filter: z.string().optional().describe("Filter by process name (case-insensitive grep)"),
+    container_name: z.string().optional().describe("Target container (default: primary)"),
+  },
+  async ({ filter, container_name }) => {
+    try {
+      const cn = resolveContainer(container_name);
+      let cmd = "ps aux --sort=-%cpu";
+      if (filter) {
+        // grep -i for case-insensitive, grep -v grep to exclude the grep process itself
+        cmd += ` | grep -i '${filter.replace(/'/g, "'\\''")}' | grep -v grep`;
+      }
+      const output = dockerExec(cmd, 10000, cn).toString();
+      let result = output;
+      if (result.length > MAX_RESPONSE_LEN) {
+        result = result.slice(0, MAX_RESPONSE_LEN) + "\n... (truncated)";
+      }
+      return { content: [{ type: "text", text: result || "(no processes)" }] };
+    } catch (err) {
+      return {
+        content: [{ type: "text", text: `Process list error: ${err.stderr?.toString() || err.message}` }],
+        isError: true
+      };
+    }
+  }
+);
+
+server.tool(
+  "computer_process_kill",
+  "Kill a process inside a computer-use container by PID or name. Use computer_process_list first to find the target.",
+  {
+    pid: z.number().optional().describe("Process ID to kill"),
+    name: z.string().optional().describe("Process name to kill (uses pkill — kills all matching processes)"),
+    signal: z.string().optional().describe("Signal to send (default: TERM). Common: TERM, KILL, INT, HUP"),
+    container_name: z.string().optional().describe("Target container (default: primary)"),
+  },
+  async ({ pid, name, signal, container_name }) => {
+    try {
+      const cn = resolveContainer(container_name);
+      if (!pid && !name) throw new Error("Either pid or name required");
+      const sig = signal || "TERM";
+
+      // Safety: prevent killing critical system processes
+      const protectedNames = ["Xvfb", "x11vnc", "xfce4-session", "start.sh", "bash"];
+      if (name && protectedNames.some(p => name.toLowerCase() === p.toLowerCase())) {
+        return {
+          content: [{ type: "text", text: `Refusing to kill protected process '${name}'. Critical for VM operation.` }],
+          isError: true
+        };
+      }
+
+      let cmd;
+      if (pid) {
+        // Protect PID 1 and low PIDs
+        if (pid <= 1) {
+          return { content: [{ type: "text", text: "Cannot kill PID 1 (init process)" }], isError: true };
+        }
+        cmd = `kill -${sig} ${pid}`;
+      } else {
+        cmd = `pkill -${sig} -f '${name.replace(/'/g, "'\\''")}'`;
+      }
+
+      try {
+        dockerExec(cmd, 10000, cn);
+      } catch {}
+
+      // Verify
+      let still_running = false;
+      try {
+        if (pid) {
+          dockerExec(`kill -0 ${pid} 2>/dev/null`, 5000, cn);
+          still_running = true;
+        }
+      } catch {}
+
+      const target = pid ? `PID ${pid}` : `'${name}'`;
+      return {
+        content: [{
+          type: "text",
+          text: still_running
+            ? `Signal ${sig} sent to ${target} — process still running (may need KILL signal)`
+            : `Signal ${sig} sent to ${target}`
+        }]
+      };
+    } catch (err) {
+      return {
+        content: [{ type: "text", text: `Kill error: ${err.stderr?.toString() || err.message}` }],
         isError: true
       };
     }
