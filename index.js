@@ -1125,6 +1125,61 @@ server.tool(
   }
 );
 
+// === Window Focus Tool ===
+
+server.tool(
+  "computer_window_focus",
+  `Focus/activate a window by title pattern or window ID. Brings the window to the front and gives it input focus.
+Use with computer_window_list to discover window IDs and titles first.`,
+  {
+    title: z.string().optional().describe("Window title substring to match (case-insensitive). First match is focused."),
+    window_id: z.number().optional().describe("Exact X window ID (from computer_window_list) to focus."),
+    container_name: z.string().optional().describe("Target container (default: primary)"),
+  },
+  async ({ title, window_id, container_name }) => {
+    try {
+      const cn = resolveContainer(container_name);
+      if (!title && !window_id) throw new Error("Provide either title or window_id");
+
+      let targetWid;
+      if (window_id) {
+        targetWid = String(window_id);
+      } else {
+        // Search by title substring
+        const wids = dockerExec("xdotool search --onlyvisible --name ''", 10000, cn)
+          .toString().trim().split("\n").filter(Boolean);
+        for (const wid of wids) {
+          try {
+            const name = dockerExec(`xdotool getwindowname ${wid}`, 5000, cn).toString().trim();
+            if (name.toLowerCase().includes(title.toLowerCase())) {
+              targetWid = wid;
+              break;
+            }
+          } catch { /* skip inaccessible windows */ }
+        }
+        if (!targetWid) throw new Error(`No window matching "${title}" found`);
+      }
+
+      // Activate and focus the window
+      dockerExec(`xdotool windowactivate ${targetWid}`, 10000, cn);
+      dockerExec(`xdotool windowfocus ${targetWid}`, 10000, cn);
+      await new Promise(r => setTimeout(r, SCREENSHOT_DELAY_MS));
+
+      const ss = takeScreenshot(cn);
+      let winName = "";
+      try { winName = dockerExec(`xdotool getwindowname ${targetWid}`, 5000, cn).toString().trim(); } catch {}
+      return {
+        content: [
+          { type: "image", data: ss.data, mimeType: ss.mimeType },
+          { type: "text", text: `Focused window ${targetWid}: "${winName}"` }
+        ]
+      };
+    } catch (err) {
+      return { content: [{ type: "text", text: `Window focus error: ${err.message}` }], isError: true };
+    }
+  }
+);
+
 server.tool(
   "computer_process_list",
   "List running processes inside a computer-use container. Returns a process table (PID, CPU%, MEM%, command). Useful for debugging, finding stuck processes, or checking what's running.",
@@ -1837,21 +1892,51 @@ function matchWordsToQuery(words, query, regionOffsetX, regionOffsetY, cn, retur
   const dh = env?.height || DISPLAY_HEIGHT;
   const s = getScaleFactor(dw, dh);
 
+  // Helper to build a match result from a span of words
+  function buildMatch(wordSpan) {
+    const first = wordSpan[0];
+    const last = wordSpan[wordSpan.length - 1];
+    const spanLeft = first.left + regionOffsetX;
+    const spanTop = Math.min(...wordSpan.map(w => w.top)) + regionOffsetY;
+    const spanRight = last.left + last.width + regionOffsetX;
+    const spanBottom = Math.max(...wordSpan.map(w => w.top + w.height)) + regionOffsetY;
+    const displayCenterX = Math.round((spanLeft + spanRight) / 2);
+    const displayCenterY = Math.round((spanTop + spanBottom) / 2);
+    return {
+      text: wordSpan.map(w => w.text).join(" "),
+      coordinate: [Math.round(displayCenterX * s), Math.round(displayCenterY * s)],
+      confidence: Math.round(Math.min(...wordSpan.map(w => w.conf))),
+      bounds: { left: Math.round(spanLeft * s), top: Math.round(spanTop * s), width: Math.round((spanRight - spanLeft) * s), height: Math.round((spanBottom - spanTop) * s) }
+    };
+  }
+
   if (queryWords.length === 1) {
+    // Direct single-word match
     for (const w of words) {
       if (w.text.toLowerCase().includes(queryLower)) {
-        const displayCenterX = w.left + regionOffsetX + Math.round(w.width / 2);
-        const displayCenterY = w.top + regionOffsetY + Math.round(w.height / 2);
-        matches.push({
-          text: w.text,
-          coordinate: [Math.round(displayCenterX * s), Math.round(displayCenterY * s)],
-          confidence: Math.round(w.conf),
-          bounds: { left: Math.round((w.left + regionOffsetX) * s), top: Math.round((w.top + regionOffsetY) * s), width: Math.round(w.width * s), height: Math.round(w.height * s) }
-        });
+        matches.push(buildMatch([w]));
         if (!returnAll) break;
       }
     }
+    // Concatenation fallback: tesseract sometimes merges adjacent words (e.g. "Sign in" → "signin")
+    // or splits them unexpectedly. Check pairs/triples of adjacent same-line words.
+    if (matches.length === 0) {
+      const queryNoSpaces = queryLower.replace(/\s+/g, "");
+      for (let i = 0; i < words.length; i++) {
+        for (let span = 2; span <= Math.min(3, words.length - i); span++) {
+          const group = words.slice(i, i + span);
+          // Must be on the same line
+          if (!group.every(w => w.lineNum === group[0].lineNum && w.blockNum === group[0].blockNum && w.parNum === group[0].parNum)) break;
+          const concat = group.map(w => w.text.toLowerCase()).join("");
+          if (concat.includes(queryNoSpaces)) {
+            matches.push(buildMatch(group));
+            if (!returnAll) { i = words.length; break; }
+          }
+        }
+      }
+    }
   } else {
+    // Multi-word query: match each query word against consecutive OCR words on the same line
     for (let i = 0; i <= words.length - queryWords.length; i++) {
       let match = true;
       for (let j = 0; j < queryWords.length; j++) {
@@ -1865,22 +1950,19 @@ function matchWordsToQuery(words, query, regionOffsetX, regionOffsetY, cn, retur
         }
       }
       if (match) {
-        const first = words[i];
-        const last = words[i + queryWords.length - 1];
-        const spanLeft = first.left + regionOffsetX;
-        const spanTop = Math.min(first.top, last.top) + regionOffsetY;
-        const spanRight = last.left + last.width + regionOffsetX;
-        const spanBottom = Math.max(first.top + first.height, last.top + last.height) + regionOffsetY;
-        const displayCenterX = Math.round((spanLeft + spanRight) / 2);
-        const displayCenterY = Math.round((spanTop + spanBottom) / 2);
-        const matchedText = words.slice(i, i + queryWords.length).map(w => w.text).join(" ");
-        matches.push({
-          text: matchedText,
-          coordinate: [Math.round(displayCenterX * s), Math.round(displayCenterY * s)],
-          confidence: Math.round(Math.min(...words.slice(i, i + queryWords.length).map(w => w.conf))),
-          bounds: { left: Math.round(spanLeft * s), top: Math.round(spanTop * s), width: Math.round((spanRight - spanLeft) * s), height: Math.round((spanBottom - spanTop) * s) }
-        });
+        matches.push(buildMatch(words.slice(i, i + queryWords.length)));
         if (!returnAll) break;
+      }
+    }
+    // Concatenation fallback for multi-word queries: check if a single OCR word contains
+    // all query words joined (e.g. searching "sign in" when tesseract returns "signin")
+    if (matches.length === 0) {
+      const queryNoSpaces = queryLower.replace(/\s+/g, "");
+      for (const w of words) {
+        if (w.text.toLowerCase().includes(queryNoSpaces)) {
+          matches.push(buildMatch([w]));
+          if (!returnAll) break;
+        }
       }
     }
   }
@@ -2044,6 +2126,66 @@ Useful for: finding buttons, labels, links, or any visible text element.`,
       };
     } catch (err) {
       return { content: [{ type: "text", text: `Find text error: ${err.message}` }], isError: true };
+    }
+  }
+);
+
+// === Wait-for-text Tool ===
+
+server.tool(
+  "computer_wait_for_text",
+  `Wait until specific text appears on screen. Polls the display with OCR at regular intervals.
+Useful for waiting for: page loads, dialogs, progress completion, buttons to appear.
+Returns the coordinate of the found text (ready for clicking) and a screenshot.
+Optionally auto-clicks the text when found.`,
+  {
+    query: z.string().describe("Text to wait for (case-insensitive substring match, supports multi-word)"),
+    timeout: z.number().min(1).max(120).default(30).describe("Max seconds to wait (default: 30)"),
+    interval: z.number().min(0.5).max(10).default(2).describe("Seconds between OCR checks (default: 2)"),
+    click: z.boolean().default(false).describe("Auto-click the text when found (default: false)"),
+    region: z.array(z.number()).length(4).optional().describe("[x1, y1, x2, y2] region to search (API coordinates). Omit for full screen."),
+    language: z.string().optional().describe("Tesseract language code (default: 'eng')"),
+    container_name: z.string().optional().describe("Target container (default: primary)"),
+  },
+  async ({ query, timeout, interval, click: autoClick, region, language, container_name }) => {
+    try {
+      const cn = resolveContainer(container_name);
+      const lang = language || "eng";
+      const timeoutMs = (timeout || 30) * 1000;
+      const intervalMs = (interval || 2) * 1000;
+      const startTime = Date.now();
+
+      while (Date.now() - startTime < timeoutMs) {
+        const matches = findTextOnScreen(query, cn, lang, region || null, false);
+        if (matches.length > 0) {
+          const m = matches[0];
+          const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+          if (autoClick) {
+            const [dx, dy] = apiToDisplay(m.coordinate[0], m.coordinate[1], cn);
+            xdotool(`mousemove ${dx} ${dy} click 1`, cn);
+            await new Promise(r => setTimeout(r, SCREENSHOT_DELAY_MS));
+          }
+          const ss = takeScreenshot(cn);
+          return {
+            content: [
+              { type: "image", data: ss.data, mimeType: ss.mimeType },
+              { type: "text", text: `Found "${m.text}" at [${m.coordinate}] after ${elapsed}s${autoClick ? " — clicked" : ""}\nconfidence: ${m.confidence}%` }
+            ]
+          };
+        }
+        await new Promise(r => setTimeout(r, intervalMs));
+      }
+
+      // Timeout — text never appeared
+      const ss = takeScreenshot(cn);
+      return {
+        content: [
+          { type: "image", data: ss.data, mimeType: ss.mimeType },
+          { type: "text", text: `Timeout: "${query}" not found after ${timeout}s` }
+        ]
+      };
+    } catch (err) {
+      return { content: [{ type: "text", text: `Wait-for-text error: ${err.message}` }], isError: true };
     }
   }
 );
