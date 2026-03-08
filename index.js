@@ -506,7 +506,7 @@ function executeAction({ action, coordinate, text, scroll_direction, scroll_amou
 
 const server = new McpServer({
   name: "computer-use",
-  version: "1.26.0",
+  version: "1.27.0",
 });
 
 const actionSchema = {
@@ -3814,6 +3814,102 @@ Paths must be absolute (start with /).`,
 
     } catch (err) {
       return { content: [{ type: "text", text: `Text editor error: ${err.message}` }], isError: true };
+    }
+  }
+);
+
+// === computer_batch — execute multiple actions in a single call ===
+server.tool(
+  "computer_batch",
+  `Execute multiple computer actions in a single call. Returns only the final screenshot.
+Much more efficient than separate tool calls when you need to perform a sequence of actions
+(e.g. click a field, type text, press Enter).
+Actions is a JSON array: [{"action":"left_click","coordinate":[100,200]},{"action":"type","text":"hello"},{"action":"key","text":"Return"}]
+Supported actions: left_click, right_click, middle_click, double_click, triple_click,
+left_click_drag, type, key, mouse_move, scroll, left_mouse_down, left_mouse_up, wait.
+Max 50 actions per batch. Stops on first error unless continue_on_error is true.`,
+  {
+    actions: z.string().describe("JSON array of actions. Each action has 'action' field plus relevant params (coordinate, text, scroll_direction, scroll_amount, start_coordinate, duration)"),
+    delay_between_ms: z.number().optional().describe("Delay between actions in ms (default: 100, min: 0, max: 5000)"),
+    continue_on_error: z.boolean().optional().describe("If true, continue executing remaining actions after an error (default: false)"),
+    container_name: z.string().optional().describe("Target container (default: primary)"),
+  },
+  async ({ actions, delay_between_ms, continue_on_error, container_name }) => {
+    try {
+      const cn = resolveContainer(container_name);
+
+      // Parse actions
+      let parsedActions;
+      try {
+        parsedActions = JSON.parse(actions);
+        if (!Array.isArray(parsedActions)) {
+          return { content: [{ type: "text", text: "Error: 'actions' must be a JSON array" }], isError: true };
+        }
+      } catch (err) {
+        return { content: [{ type: "text", text: `Error parsing actions JSON: ${err.message}` }], isError: true };
+      }
+
+      if (parsedActions.length === 0) {
+        return { content: [{ type: "text", text: "Error: actions array is empty" }], isError: true };
+      }
+      if (parsedActions.length > 50) {
+        return { content: [{ type: "text", text: `Error: max 50 actions per batch (got ${parsedActions.length}). Split into multiple calls.` }], isError: true };
+      }
+
+      // Validate action types
+      const validActions = ["left_click", "right_click", "middle_click", "double_click",
+        "triple_click", "left_click_drag", "type", "key", "mouse_move", "scroll",
+        "left_mouse_down", "left_mouse_up", "wait"];
+      for (let i = 0; i < parsedActions.length; i++) {
+        const a = parsedActions[i];
+        if (!a.action || !validActions.includes(a.action)) {
+          return { content: [{ type: "text", text: `Error: action[${i}] has invalid action '${a.action}'. Valid: ${validActions.join(", ")}` }], isError: true };
+        }
+      }
+
+      const delayMs = Math.max(0, Math.min(delay_between_ms ?? 100, 5000));
+      const stopOnError = !continue_on_error;
+      let executed = 0;
+      const errors = [];
+
+      for (let i = 0; i < parsedActions.length; i++) {
+        const a = parsedActions[i];
+        try {
+          if (a.action === "wait") {
+            const waitMs = Math.max(0.1, Math.min(a.duration || 1, 30)) * 1000;
+            await new Promise(r => setTimeout(r, waitMs));
+          } else {
+            executeAction(a, cn);
+          }
+          executed++;
+
+          // Delay between actions (skip after last)
+          if (i < parsedActions.length - 1 && delayMs > 0) {
+            await new Promise(r => setTimeout(r, delayMs));
+          }
+        } catch (err) {
+          errors.push(`action[${i}](${a.action}): ${err.message}`);
+          if (stopOnError) break;
+        }
+      }
+
+      // Take final screenshot
+      await new Promise(r => setTimeout(r, SCREENSHOT_DELAY_MS));
+      const ss = takeScreenshot(cn);
+
+      let summary = `Batch complete: ${executed}/${parsedActions.length} actions executed`;
+      if (errors.length > 0) {
+        summary += `\nErrors (${errors.length}):\n  ${errors.slice(0, 10).join("\n  ")}`;
+      }
+
+      return {
+        content: [
+          { type: "image", data: ss.data, mimeType: ss.mimeType },
+          { type: "text", text: summary }
+        ]
+      };
+    } catch (err) {
+      return { content: [{ type: "text", text: `Batch error: ${err.message}` }], isError: true };
     }
   }
 );
