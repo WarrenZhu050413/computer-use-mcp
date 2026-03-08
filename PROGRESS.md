@@ -193,3 +193,45 @@ screenshot, left_click, right_click, double_click, triple_click, left_click_drag
 - [ ] Session recording/replay
 - [ ] File exchange helpers via /workspace
 - [ ] Browser automation helpers
+
+---
+
+## Cycle 5 (2026-03-08)
+
+### JPEG Screenshot Compression
+- Added `SCREENSHOT_FORMAT` env var (jpeg/png, default: jpeg)
+- Added `SCREENSHOT_QUALITY` env var (1-100, default: 80)
+- PNG: ~182KB → JPEG q80: ~121KB (33% reduction per screenshot)
+- All screenshot paths updated: screenshot, wait, zoom, follow-up, error handler
+- Correct MIME types propagated (`image/jpeg` or `image/png`)
+
+### Container Auto-Recovery
+- `dockerExec()` now detects when container is stopped and auto-recovers
+- Uses full recreation (`docker rm -f` + `docker run -d`) instead of `docker start`
+  - `docker start` leaves stale X11 lock files that prevent Xvfb from starting
+- Waits up to 15s for display readiness after recreation
+- Configurable via env vars: `CONTAINER_IMAGE`, `CONTAINER_VNC_PORT`, `CONTAINER_NOVNC_PORT`, `CONTAINER_WORKSPACE`
+
+### Verification Results
+- **JPEG screenshots**: ✅ Returns `image/jpeg` mime type
+- **JPEG zoom**: ✅ Zoom action uses JPEG format
+- **Auto-recovery**: ✅ Stopped container → screenshot triggered full recreation → desktop came up → screenshot succeeded
+- **Real-world browsing**: ✅ Browsed Anthropic Computer Use docs, scrolled, clicked expandable sections
+
+### Spec Re-Verification
+- Browsed live Anthropic docs — confirmed all actions match spec
+- `computer_20251124` adds `zoom` only (requires `enable_zoom: true` in tool definition)
+- `hold_key` = duration-based hold (confirmed)
+- No new actions or breaking changes detected
+
+### Commits
+1. `dd3d028` — feat: JPEG screenshot compression and container auto-recovery
+2. `e80e9f4` — fix: container auto-recovery uses full recreation instead of docker start
+
+### Next Steps
+- [ ] Multi-container support (spawn/destroy environments on demand)
+- [ ] Resolution switching (with coordinate scaling for > 1568px)
+- [ ] `display_number` param support
+- [ ] Session recording/replay
+- [ ] File exchange helpers via /workspace
+- [ ] Browser automation helpers
