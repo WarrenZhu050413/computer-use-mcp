@@ -427,7 +427,7 @@ function executeAction({ action, coordinate, text, scroll_direction, scroll_amou
 
 const server = new McpServer({
   name: "computer-use",
-  version: "1.11.0",
+  version: "1.12.0",
 });
 
 const actionSchema = {
@@ -1800,6 +1800,127 @@ zoom (zoom_in/zoom_out/zoom_reset).`,
   }
 );
 
+// === OCR Helper ===
+
+// Shared text-finding logic used by computer_find_text and computer_scroll_to
+function findTextOnScreen(query, cn, lang = "eng", region = null, returnAll = true) {
+  const id = randomUUID().slice(0, 8);
+  const pngPath = `/tmp/_fts_${id}.png`;
+
+  dockerExec(`scrot -o ${pngPath}`, 30000, cn);
+
+  let regionOffsetX = 0, regionOffsetY = 0;
+  let ocrInput = pngPath;
+
+  if (region) {
+    const [x1, y1, x2, y2] = region;
+    const [dx1, dy1] = apiToDisplay(x1, y1, cn);
+    const [dx2, dy2] = apiToDisplay(x2, y2, cn);
+    const w = dx2 - dx1;
+    const h = dy2 - dy1;
+    if (w <= 0 || h <= 0) throw new Error("Invalid region: width and height must be positive");
+    const cropPath = `/tmp/_fts_${id}_crop.png`;
+    dockerExec(`convert ${pngPath} -crop ${w}x${h}+${dx1}+${dy1} +repage ${cropPath}`, 30000, cn);
+    ocrInput = cropPath;
+    regionOffsetX = dx1;
+    regionOffsetY = dy1;
+  }
+
+  const outBase = `/tmp/_fts_${id}_out`;
+  dockerExec(`tesseract ${ocrInput} ${outBase} -l ${lang} --psm 3 tsv 2>/dev/null`, 60000, cn);
+  const tsv = dockerExec(`cat ${outBase}.tsv && rm -f /tmp/_fts_${id}*`, 10000, cn).toString();
+
+  const lines = tsv.split("\n").slice(1);
+  const queryLower = query.toLowerCase();
+  const matches = [];
+
+  const words = [];
+  for (const line of lines) {
+    const cols = line.split("\t");
+    if (cols.length < 12) continue;
+    const level = parseInt(cols[0]);
+    if (level !== 5) continue;
+    const conf = parseFloat(cols[10]);
+    const text = cols[11]?.trim();
+    if (!text || conf < 0) continue;
+    words.push({
+      text,
+      left: parseInt(cols[6]),
+      top: parseInt(cols[7]),
+      width: parseInt(cols[8]),
+      height: parseInt(cols[9]),
+      conf,
+      lineNum: parseInt(cols[4]),
+      blockNum: parseInt(cols[2]),
+      parNum: parseInt(cols[3]),
+    });
+  }
+
+  const queryWords = queryLower.split(/\s+/).filter(w => w.length > 0);
+
+  if (queryWords.length === 1) {
+    for (const w of words) {
+      if (w.text.toLowerCase().includes(queryLower)) {
+        const displayCenterX = w.left + regionOffsetX + Math.round(w.width / 2);
+        const displayCenterY = w.top + regionOffsetY + Math.round(w.height / 2);
+        const env = environments.get(cn);
+        const dw = env?.width || DISPLAY_WIDTH;
+        const dh = env?.height || DISPLAY_HEIGHT;
+        const s = getScaleFactor(dw, dh);
+        const apiX = Math.round(displayCenterX * s);
+        const apiY = Math.round(displayCenterY * s);
+        matches.push({
+          text: w.text,
+          coordinate: [apiX, apiY],
+          confidence: Math.round(w.conf),
+          bounds: { left: Math.round((w.left + regionOffsetX) * s), top: Math.round((w.top + regionOffsetY) * s), width: Math.round(w.width * s), height: Math.round(w.height * s) }
+        });
+        if (!returnAll) break;
+      }
+    }
+  } else {
+    for (let i = 0; i <= words.length - queryWords.length; i++) {
+      let match = true;
+      for (let j = 0; j < queryWords.length; j++) {
+        const w = words[i + j];
+        if (!w.text.toLowerCase().includes(queryWords[j])) { match = false; break; }
+        if (j > 0) {
+          const prev = words[i + j - 1];
+          if (w.lineNum !== prev.lineNum || w.blockNum !== prev.blockNum || w.parNum !== prev.parNum) {
+            match = false; break;
+          }
+        }
+      }
+      if (match) {
+        const first = words[i];
+        const last = words[i + queryWords.length - 1];
+        const spanLeft = first.left + regionOffsetX;
+        const spanTop = Math.min(first.top, last.top) + regionOffsetY;
+        const spanRight = last.left + last.width + regionOffsetX;
+        const spanBottom = Math.max(first.top + first.height, last.top + last.height) + regionOffsetY;
+        const displayCenterX = Math.round((spanLeft + spanRight) / 2);
+        const displayCenterY = Math.round((spanTop + spanBottom) / 2);
+        const env = environments.get(cn);
+        const dw = env?.width || DISPLAY_WIDTH;
+        const dh = env?.height || DISPLAY_HEIGHT;
+        const s = getScaleFactor(dw, dh);
+        const apiX = Math.round(displayCenterX * s);
+        const apiY = Math.round(displayCenterY * s);
+        const matchedText = words.slice(i, i + queryWords.length).map(w => w.text).join(" ");
+        matches.push({
+          text: matchedText,
+          coordinate: [apiX, apiY],
+          confidence: Math.round(Math.min(...words.slice(i, i + queryWords.length).map(w => w.conf))),
+          bounds: { left: Math.round(spanLeft * s), top: Math.round(spanTop * s), width: Math.round((spanRight - spanLeft) * s), height: Math.round((spanBottom - spanTop) * s) }
+        });
+        if (!returnAll) break;
+      }
+    }
+  }
+
+  return matches;
+}
+
 // === OCR Tools ===
 
 server.tool(
@@ -1874,134 +1995,9 @@ Useful for: finding buttons, labels, links, or any visible text element.`,
       const cn = resolveContainer(container_name);
       const lang = language || "eng";
       const returnAll = all_matches !== false;
-      const id = randomUUID().slice(0, 8);
-      const pngPath = `/tmp/_find_${id}.png`;
 
-      // Capture screenshot
-      dockerExec(`scrot -o ${pngPath}`, 30000, cn);
+      const matches = findTextOnScreen(query, cn, lang, region || null, returnAll);
 
-      // Region offset (for converting back to full-screen coords)
-      let regionOffsetX = 0, regionOffsetY = 0;
-      let ocrInput = pngPath;
-
-      if (region) {
-        const [x1, y1, x2, y2] = region;
-        const [dx1, dy1] = apiToDisplay(x1, y1, cn);
-        const [dx2, dy2] = apiToDisplay(x2, y2, cn);
-        const w = dx2 - dx1;
-        const h = dy2 - dy1;
-        if (w <= 0 || h <= 0) {
-          return { content: [{ type: "text", text: "Invalid region: width and height must be positive" }], isError: true };
-        }
-        const cropPath = `/tmp/_find_${id}_crop.png`;
-        dockerExec(`convert ${pngPath} -crop ${w}x${h}+${dx1}+${dy1} +repage ${cropPath}`, 30000, cn);
-        ocrInput = cropPath;
-        regionOffsetX = dx1;
-        regionOffsetY = dy1;
-      }
-
-      // Run tesseract with TSV output (gives bounding boxes)
-      const outBase = `/tmp/_find_${id}_out`;
-      dockerExec(`tesseract ${ocrInput} ${outBase} -l ${lang} --psm 3 tsv 2>/dev/null`, 60000, cn);
-      const tsv = dockerExec(`cat ${outBase}.tsv && rm -f /tmp/_find_${id}*`, 10000, cn).toString();
-
-      // Parse TSV — find matching words
-      const lines = tsv.split("\n").slice(1); // skip header
-      const queryLower = query.toLowerCase();
-      const matches = [];
-
-      // First pass: collect all words with positions (level 5 = word)
-      const words = [];
-      for (const line of lines) {
-        const cols = line.split("\t");
-        if (cols.length < 12) continue;
-        const level = parseInt(cols[0]);
-        if (level !== 5) continue;
-        const conf = parseFloat(cols[10]);
-        const text = cols[11]?.trim();
-        if (!text || conf < 0) continue;
-        words.push({
-          text,
-          left: parseInt(cols[6]),
-          top: parseInt(cols[7]),
-          width: parseInt(cols[8]),
-          height: parseInt(cols[9]),
-          conf,
-          lineNum: parseInt(cols[4]),
-          blockNum: parseInt(cols[2]),
-          parNum: parseInt(cols[3]),
-        });
-      }
-
-      // Multi-word matching: try to find query as consecutive words on same line
-      const queryWords = queryLower.split(/\s+/).filter(w => w.length > 0);
-
-      if (queryWords.length === 1) {
-        // Single word: substring match against each word
-        for (const w of words) {
-          if (w.text.toLowerCase().includes(queryLower)) {
-            const displayCenterX = w.left + regionOffsetX + Math.round(w.width / 2);
-            const displayCenterY = w.top + regionOffsetY + Math.round(w.height / 2);
-            // Convert display coords to API coords
-            const env = environments.get(cn);
-            const dw = env?.width || DISPLAY_WIDTH;
-            const dh = env?.height || DISPLAY_HEIGHT;
-            const s = getScaleFactor(dw, dh);
-            const apiX = Math.round(displayCenterX * s);
-            const apiY = Math.round(displayCenterY * s);
-            matches.push({
-              text: w.text,
-              coordinate: [apiX, apiY],
-              confidence: Math.round(w.conf),
-              bounds: { left: Math.round((w.left + regionOffsetX) * s), top: Math.round((w.top + regionOffsetY) * s), width: Math.round(w.width * s), height: Math.round(w.height * s) }
-            });
-            if (!returnAll) break;
-          }
-        }
-      } else {
-        // Multi-word: find consecutive words on same line that match
-        for (let i = 0; i <= words.length - queryWords.length; i++) {
-          let match = true;
-          for (let j = 0; j < queryWords.length; j++) {
-            const w = words[i + j];
-            if (!w.text.toLowerCase().includes(queryWords[j])) { match = false; break; }
-            // Check same line (same block + par + line)
-            if (j > 0) {
-              const prev = words[i + j - 1];
-              if (w.lineNum !== prev.lineNum || w.blockNum !== prev.blockNum || w.parNum !== prev.parNum) {
-                match = false; break;
-              }
-            }
-          }
-          if (match) {
-            // Compute bounding box spanning all matched words
-            const first = words[i];
-            const last = words[i + queryWords.length - 1];
-            const spanLeft = first.left + regionOffsetX;
-            const spanTop = Math.min(first.top, last.top) + regionOffsetY;
-            const spanRight = last.left + last.width + regionOffsetX;
-            const spanBottom = Math.max(first.top + first.height, last.top + last.height) + regionOffsetY;
-            const displayCenterX = Math.round((spanLeft + spanRight) / 2);
-            const displayCenterY = Math.round((spanTop + spanBottom) / 2);
-            const env = environments.get(cn);
-            const dw = env?.width || DISPLAY_WIDTH;
-            const dh = env?.height || DISPLAY_HEIGHT;
-            const s = getScaleFactor(dw, dh);
-            const apiX = Math.round(displayCenterX * s);
-            const apiY = Math.round(displayCenterY * s);
-            const matchedText = words.slice(i, i + queryWords.length).map(w => w.text).join(" ");
-            matches.push({
-              text: matchedText,
-              coordinate: [apiX, apiY],
-              confidence: Math.round(Math.min(...words.slice(i, i + queryWords.length).map(w => w.conf))),
-              bounds: { left: Math.round(spanLeft * s), top: Math.round(spanTop * s), width: Math.round((spanRight - spanLeft) * s), height: Math.round((spanBottom - spanTop) * s) }
-            });
-            if (!returnAll) break;
-          }
-        }
-      }
-
-      // Return results with screenshot
       const ss = takeScreenshot(cn);
       if (matches.length === 0) {
         return {
@@ -2024,6 +2020,115 @@ Useful for: finding buttons, labels, links, or any visible text element.`,
       };
     } catch (err) {
       return { content: [{ type: "text", text: `Find text error: ${err.message}` }], isError: true };
+    }
+  }
+);
+
+// === Scroll-to-text Tool ===
+
+server.tool(
+  "computer_scroll_to",
+  `Scroll until a text target appears on screen. Combines OCR text search with automatic scrolling.
+If the text is already visible, returns immediately with its coordinates.
+Otherwise scrolls in the given direction, re-checking after each scroll, until found or max attempts reached.
+Detects when the page stops scrolling (hit top/bottom) and stops early.
+Optionally auto-clicks the found text.`,
+  {
+    query: z.string().describe("Text to find (case-insensitive substring match, supports multi-word)"),
+    direction: z.enum(["up", "down"]).default("down").describe("Scroll direction (default: down)"),
+    scroll_amount: z.number().min(1).max(20).default(5).describe("Scroll clicks per attempt (default: 5)"),
+    max_scrolls: z.number().min(1).max(50).default(20).describe("Max scroll attempts before giving up (default: 20)"),
+    click: z.boolean().default(false).describe("Auto-click the first match when found (default: false)"),
+    language: z.string().optional().describe("Tesseract language code (default: 'eng')"),
+    container_name: z.string().optional().describe("Target container (default: primary)"),
+  },
+  async ({ query, direction, scroll_amount, max_scrolls, click: autoClick, language, container_name }) => {
+    try {
+      const cn = resolveContainer(container_name);
+      const lang = language || "eng";
+      const scrollDir = direction || "down";
+      const amount = scroll_amount || 5;
+      const maxAttempts = max_scrolls || 20;
+
+      // Check if text is already visible
+      let matches = findTextOnScreen(query, cn, lang, null, false);
+      if (matches.length > 0) {
+        const m = matches[0];
+        if (autoClick) {
+          const [dx, dy] = apiToDisplay(m.coordinate[0], m.coordinate[1], cn);
+          xdotool(`mousemove ${dx} ${dy} click 1`, cn);
+          await new Promise(r => setTimeout(r, SCREENSHOT_DELAY_MS));
+        }
+        const ss = takeScreenshot(cn);
+        return {
+          content: [
+            { type: "image", data: ss.data, mimeType: ss.mimeType },
+            { type: "text", text: `Found "${m.text}" at [${m.coordinate}] (already visible, 0 scrolls)${autoClick ? " — clicked" : ""}\nconfidence: ${m.confidence}%` }
+          ]
+        };
+      }
+
+      // Scroll loop
+      let prevScreenHash = null;
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        // Scroll
+        const buttonMap = { up: 4, down: 5 };
+        const btn = buttonMap[scrollDir] || 5;
+        // Move to center of screen for scrolling
+        const env = environments.get(cn);
+        const dw = env?.width || DISPLAY_WIDTH;
+        const dh = env?.height || DISPLAY_HEIGHT;
+        xdotool(`mousemove ${Math.round(dw / 2)} ${Math.round(dh / 2)}`, cn);
+        xdotool(`click --repeat ${amount} --delay 50 ${btn}`, cn);
+        await new Promise(r => setTimeout(r, SCREENSHOT_DELAY_MS));
+
+        // Detect stuck (page didn't scroll — hit top/bottom)
+        const id = randomUUID().slice(0, 8);
+        const checkPath = `/tmp/_st_${id}.png`;
+        dockerExec(`scrot -o ${checkPath}`, 30000, cn);
+        const hashOut = dockerExec(`md5sum ${checkPath} && rm -f ${checkPath}`, 10000, cn).toString().trim();
+        const currentHash = hashOut.split(/\s+/)[0];
+        if (prevScreenHash && currentHash === prevScreenHash) {
+          // Screen didn't change — hit the end
+          const ss = takeScreenshot(cn);
+          return {
+            content: [
+              { type: "image", data: ss.data, mimeType: ss.mimeType },
+              { type: "text", text: `"${query}" not found — page stopped scrolling ${scrollDir} after ${attempt} scroll${attempt === 1 ? "" : "s"} (hit ${scrollDir === "down" ? "bottom" : "top"})` }
+            ]
+          };
+        }
+        prevScreenHash = currentHash;
+
+        // Check for text
+        matches = findTextOnScreen(query, cn, lang, null, false);
+        if (matches.length > 0) {
+          const m = matches[0];
+          if (autoClick) {
+            const [dx, dy] = apiToDisplay(m.coordinate[0], m.coordinate[1], cn);
+            xdotool(`mousemove ${dx} ${dy} click 1`, cn);
+            await new Promise(r => setTimeout(r, SCREENSHOT_DELAY_MS));
+          }
+          const ss = takeScreenshot(cn);
+          return {
+            content: [
+              { type: "image", data: ss.data, mimeType: ss.mimeType },
+              { type: "text", text: `Found "${m.text}" at [${m.coordinate}] after ${attempt} scroll${attempt === 1 ? "" : "s"} ${scrollDir}${autoClick ? " — clicked" : ""}\nconfidence: ${m.confidence}%` }
+            ]
+          };
+        }
+      }
+
+      // Max scrolls reached without finding
+      const ss = takeScreenshot(cn);
+      return {
+        content: [
+          { type: "image", data: ss.data, mimeType: ss.mimeType },
+          { type: "text", text: `"${query}" not found after ${maxAttempts} scrolls ${scrollDir}` }
+        ]
+      };
+    } catch (err) {
+      return { content: [{ type: "text", text: `Scroll-to error: ${err.message}` }], isError: true };
     }
   }
 );
