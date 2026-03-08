@@ -17,7 +17,7 @@
       ],
       "env": {
         "PROJECT_ROOT": "/Users/kevinster/computer-use-mcp",
-        "WORKER_NAME": "cu-chief"
+        "WORKER_NAME": "chief-of-staff"
       }
     }
   }
