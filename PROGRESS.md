@@ -634,7 +634,76 @@ The cycle 12 unicode fallback used `ctrl+shift+v` to paste from clipboard, which
 - Server version: 1.7.1
 
 ### Next Steps
-- [ ] Session recording/replay
+- [x] Session recording/replay → ✅ cycle 14
 - [ ] Keyboard shortcut helper (common shortcuts as named actions)
 - [ ] `computer_type_file` — type large content via file (bypass xdotool limits)
 - [ ] Edge case testing: large files, special filenames, symlinks
+
+---
+
+## Cycle 14 (2026-03-08)
+
+### Session Recording/Replay
+Major feature: record, save, and replay user sessions on virtual desktops.
+
+**New Tools:**
+- `computer_session_start` — begin recording actions on a container
+  - Named sessions (auto-generated if omitted)
+  - One active session per container (prevents conflicts)
+  - Records all `computer` tool actions with timestamps and elapsed_ms
+- `computer_session_stop` — stop recording and save to workspace
+  - Saves JSON to `{workspace}/sessions/{name}.json`
+  - Returns action summary (counts per action type)
+  - Optional `discard` mode to throw away recording
+  - Auto-detects single active session (no name required if only one)
+- `computer_session_replay` — replay a saved session
+  - Timing preservation with speed multiplier (0.1x to 10x)
+  - `dry_run` mode lists actions without executing
+  - Skips screenshot-only actions during replay (no-ops)
+  - Returns final screenshot + completion summary
+  - Error-tolerant: continues on individual action failures, reports errors at end
+
+**How it works:**
+- In-memory `activeSessions` Map tracks active recordings
+- Recording hooks in the `computer` tool handler log every action (screenshot, click, type, key, scroll, etc.)
+- Each action entry includes: timestamp (ISO), elapsed_ms (from session start), action name, params (filtered to non-undefined)
+- Sessions saved as portable JSON — can be transferred between containers or shared
+
+**Session JSON format:**
+```json
+{
+  "name": "session-name",
+  "container": "computer-use",
+  "resolution": "1024x768",
+  "started": "2026-03-08T14:43:28.177Z",
+  "ended": "2026-03-08T14:43:47.623Z",
+  "duration_ms": 19445,
+  "action_count": 3,
+  "actions": [
+    { "timestamp": "...", "elapsed_ms": 3950, "action": "screenshot", "params": {} },
+    { "timestamp": "...", "elapsed_ms": 7788, "action": "left_click", "params": { "coordinate": [500, 400] } },
+    { "timestamp": "...", "elapsed_ms": 14129, "action": "scroll", "params": { "coordinate": [500, 400], "scroll_direction": "down", "scroll_amount": 3 } }
+  ]
+}
+```
+
+### Verification Results
+- **Session start**: ✅ Recording created, confirmed one-per-container guard
+- **Action recording**: ✅ Screenshot, left_click, scroll all logged with correct params and timing
+- **Session stop**: ✅ JSON saved to workspace/sessions/, action summary returned
+- **Dry run**: ✅ Lists actions with timing without executing
+- **Replay at 5x**: ✅ 3/3 actions executed, page scrolled down matching original behavior, 0 errors
+
+### Commits
+1. `2eaa159` — feat: session recording/replay (computer_session_start/stop/replay)
+
+### Code Stats
+- MCP server: ~1580 lines (up from ~1295)
+- 20 MCP tools: computer, computer_bash, computer_status, computer_clipboard, computer_window_list, computer_file_read, computer_file_write, computer_process_list, computer_process_kill, computer_navigate, computer_open, computer_session_start, computer_session_stop, computer_session_replay, computer_env_create, computer_env_destroy, computer_env_list, computer_env_resize, computer_env_resize, computer_env_list
+- Server version: 1.8.0
+
+### Next Steps
+- [ ] Keyboard shortcut helper (common shortcuts as named actions)
+- [ ] `computer_type_file` — type large content via file (bypass xdotool limits)
+- [ ] Edge case testing: large files, special filenames, symlinks
+- [ ] Session recording with screenshots (optional screenshot capture per action)
