@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "computer-use-mcp": {
+      "command": "node",
+      "args": ["index.js"],
+      "cwd": "/Users/kevinster/computer-use-mcp"
+    }
+  }
+}

@@ -73,7 +73,6 @@ Every action (except screenshot, wait) returns a screenshot showing the result.`
     scroll_direction: z.enum(["up", "down", "left", "right"]).optional().describe("Scroll direction"),
     scroll_amount: z.number().optional().describe("Number of scroll clicks (default 3)"),
     start_coordinate: z.array(z.number()).optional().describe("[x, y] start position for drag"),
-    end_coordinate: z.array(z.number()).optional().describe("[x, y] end position for drag"),
     duration: z.number().optional().describe("Seconds to wait (for wait action) or hold key duration"),
     key_to_hold: z.string().optional().describe("Key to hold while performing action (for hold_key)"),
     held_action: z.object({
@@ -84,7 +83,7 @@ Every action (except screenshot, wait) returns a screenshot showing the result.`
     region: z.array(z.number()).optional().describe("[x1, y1, x2, y2] region to zoom into"),
   },
   async ({ action, coordinate, text, scroll_direction, scroll_amount,
-           start_coordinate, end_coordinate, duration, key_to_hold, held_action, region }) => {
+           start_coordinate, duration, key_to_hold, held_action, region }) => {
     try {
       switch (action) {
         case "screenshot": {
@@ -102,9 +101,9 @@ Every action (except screenshot, wait) returns a screenshot showing the result.`
           const [x, y] = coordinate;
           if (text) {
             const mod = mapKey(text);
-            xdotool(`mousemove --sync ${x} ${y} keydown ${mod} click 1 keyup ${mod}`);
+            xdotool(`mousemove ${x} ${y} keydown ${mod} click 1 keyup ${mod}`);
           } else {
-            xdotool(`mousemove --sync ${x} ${y} click 1`);
+            xdotool(`mousemove ${x} ${y} click 1`);
           }
           break;
         }
@@ -112,36 +111,35 @@ Every action (except screenshot, wait) returns a screenshot showing the result.`
         case "right_click": {
           if (!coordinate) throw new Error("coordinate required for right_click");
           const [x, y] = coordinate;
-          xdotool(`mousemove --sync ${x} ${y} click 3`);
+          xdotool(`mousemove ${x} ${y} click 3`);
           break;
         }
 
         case "middle_click": {
           if (!coordinate) throw new Error("coordinate required for middle_click");
           const [x, y] = coordinate;
-          xdotool(`mousemove --sync ${x} ${y} click 2`);
+          xdotool(`mousemove ${x} ${y} click 2`);
           break;
         }
 
         case "double_click": {
           if (!coordinate) throw new Error("coordinate required for double_click");
           const [x, y] = coordinate;
-          xdotool(`mousemove --sync ${x} ${y} click --repeat 2 --delay 100 1`);
+          xdotool(`mousemove ${x} ${y} click --repeat 2 --delay 100 1`);
           break;
         }
 
         case "triple_click": {
           if (!coordinate) throw new Error("coordinate required for triple_click");
           const [x, y] = coordinate;
-          xdotool(`mousemove --sync ${x} ${y} click --repeat 3 --delay 100 1`);
+          xdotool(`mousemove ${x} ${y} click --repeat 3 --delay 100 1`);
           break;
         }
 
         case "left_click_drag": {
-          const start = start_coordinate || coordinate;
-          const end = end_coordinate;
-          if (!start || !end) throw new Error("start_coordinate and end_coordinate (or coordinate + end_coordinate) required for drag");
-          xdotool(`mousemove --sync ${start[0]} ${start[1]} mousedown 1 mousemove --sync ${end[0]} ${end[1]} mouseup 1`);
+          if (!start_coordinate) throw new Error("start_coordinate required for left_click_drag");
+          if (!coordinate) throw new Error("coordinate (end position) required for left_click_drag");
+          xdotool(`mousemove ${start_coordinate[0]} ${start_coordinate[1]} mousedown 1 mousemove ${coordinate[0]} ${coordinate[1]} mouseup 1`);
           break;
         }
 
@@ -162,7 +160,7 @@ Every action (except screenshot, wait) returns a screenshot showing the result.`
         case "mouse_move": {
           if (!coordinate) throw new Error("coordinate required for mouse_move");
           const [x, y] = coordinate;
-          xdotool(`mousemove --sync ${x} ${y}`);
+          xdotool(`mousemove ${x} ${y}`);
           break;
         }
 
@@ -171,7 +169,7 @@ Every action (except screenshot, wait) returns a screenshot showing the result.`
           const [x, y] = coordinate;
           const dir = scroll_direction || "down";
           const amount = scroll_amount || 3;
-          xdotool(`mousemove --sync ${x} ${y}`);
+          xdotool(`mousemove ${x} ${y}`);
           const buttonMap = { up: 4, down: 5, left: 6, right: 7 };
           const btn = buttonMap[dir] || 5;
           for (let i = 0; i < amount; i++) {
@@ -183,7 +181,7 @@ Every action (except screenshot, wait) returns a screenshot showing the result.`
         case "left_mouse_down": {
           if (coordinate) {
             const [x, y] = coordinate;
-            xdotool(`mousemove --sync ${x} ${y} mousedown 1`);
+            xdotool(`mousemove ${x} ${y} mousedown 1`);
           } else {
             xdotool(`mousedown 1`);
           }
@@ -193,7 +191,7 @@ Every action (except screenshot, wait) returns a screenshot showing the result.`
         case "left_mouse_up": {
           if (coordinate) {
             const [x, y] = coordinate;
-            xdotool(`mousemove --sync ${x} ${y} mouseup 1`);
+            xdotool(`mousemove ${x} ${y} mouseup 1`);
           } else {
             xdotool(`mouseup 1`);
           }
@@ -206,7 +204,7 @@ Every action (except screenshot, wait) returns a screenshot showing the result.`
           if (held_action) {
             xdotool(`keydown ${k}`);
             if (held_action.action === "left_click" && held_action.coordinate) {
-              xdotool(`mousemove --sync ${held_action.coordinate[0]} ${held_action.coordinate[1]} click 1`);
+              xdotool(`mousemove ${held_action.coordinate[0]} ${held_action.coordinate[1]} click 1`);
             } else if (held_action.action === "type" && held_action.text) {
               const esc = held_action.text.replace(/'/g, "'\\''");
               dockerExec(`xdotool type --delay 12 '${esc}'`);
@@ -315,7 +313,7 @@ server.tool(
         { timeout: 5000 }).toString().trim();
       let display = "unknown";
       try {
-        dockerExec("xdpyinfo | head -3");
+        dockerExec("xdotool getdisplaygeometry");
         display = "active";
       } catch { display = "inactive"; }
       return {
