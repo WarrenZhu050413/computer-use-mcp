@@ -1180,6 +1180,206 @@ Use with computer_window_list to discover window IDs and titles first.`,
   }
 );
 
+// === Window Move Tool ===
+
+server.tool(
+  "computer_window_move",
+  `Move a window to a specific position on screen. Coordinates are in API space (auto-scaled for high-res displays).
+Use with computer_window_list to discover window IDs and titles.`,
+  {
+    x: z.number().describe("Target X position (left edge of window) in API coordinates"),
+    y: z.number().describe("Target Y position (top edge of window) in API coordinates"),
+    title: z.string().optional().describe("Window title substring to match (case-insensitive). First match is moved."),
+    window_id: z.number().optional().describe("Exact X window ID (from computer_window_list) to move."),
+    container_name: z.string().optional().describe("Target container (default: primary)"),
+  },
+  async ({ x, y, title, window_id, container_name }) => {
+    try {
+      const cn = resolveContainer(container_name);
+      if (!title && !window_id) throw new Error("Provide either title or window_id");
+
+      let targetWid;
+      if (window_id) {
+        targetWid = String(window_id);
+      } else {
+        const wids = dockerExec("xdotool search --onlyvisible --name ''", 10000, cn)
+          .toString().trim().split("\n").filter(Boolean);
+        for (const wid of wids) {
+          try {
+            const name = dockerExec(`xdotool getwindowname ${wid}`, 5000, cn).toString().trim();
+            if (name.toLowerCase().includes(title.toLowerCase())) {
+              targetWid = wid;
+              break;
+            }
+          } catch { /* skip inaccessible windows */ }
+        }
+        if (!targetWid) throw new Error(`No window matching "${title}" found`);
+      }
+
+      // Convert API coordinates to display coordinates
+      const [dx, dy] = apiToDisplay(x, y, cn);
+      dockerExec(`xdotool windowmove ${targetWid} ${dx} ${dy}`, 10000, cn);
+      await new Promise(r => setTimeout(r, SCREENSHOT_DELAY_MS));
+
+      const ss = takeScreenshot(cn);
+      let winName = "";
+      try { winName = dockerExec(`xdotool getwindowname ${targetWid}`, 5000, cn).toString().trim(); } catch {}
+      return {
+        content: [
+          { type: "image", data: ss.data, mimeType: ss.mimeType },
+          { type: "text", text: `Moved window ${targetWid} ("${winName}") to [${x}, ${y}] (display: ${dx}, ${dy})` }
+        ]
+      };
+    } catch (err) {
+      return { content: [{ type: "text", text: `Window move error: ${err.message}` }], isError: true };
+    }
+  }
+);
+
+// === Window Resize Tool ===
+
+server.tool(
+  "computer_window_resize",
+  `Resize a window to specific dimensions. Dimensions are in API space (auto-scaled for high-res displays).
+Use with computer_window_list to discover window IDs and titles.`,
+  {
+    width: z.number().describe("Target width in API pixels"),
+    height: z.number().describe("Target height in API pixels"),
+    title: z.string().optional().describe("Window title substring to match (case-insensitive). First match is resized."),
+    window_id: z.number().optional().describe("Exact X window ID (from computer_window_list) to resize."),
+    container_name: z.string().optional().describe("Target container (default: primary)"),
+  },
+  async ({ width, height, title, window_id, container_name }) => {
+    try {
+      const cn = resolveContainer(container_name);
+      if (!title && !window_id) throw new Error("Provide either title or window_id");
+
+      let targetWid;
+      if (window_id) {
+        targetWid = String(window_id);
+      } else {
+        const wids = dockerExec("xdotool search --onlyvisible --name ''", 10000, cn)
+          .toString().trim().split("\n").filter(Boolean);
+        for (const wid of wids) {
+          try {
+            const name = dockerExec(`xdotool getwindowname ${wid}`, 5000, cn).toString().trim();
+            if (name.toLowerCase().includes(title.toLowerCase())) {
+              targetWid = wid;
+              break;
+            }
+          } catch { /* skip inaccessible windows */ }
+        }
+        if (!targetWid) throw new Error(`No window matching "${title}" found`);
+      }
+
+      // Convert API dimensions to display dimensions
+      const [dw, dh] = apiToDisplay(width, height, cn);
+      dockerExec(`xdotool windowsize ${targetWid} ${dw} ${dh}`, 10000, cn);
+      await new Promise(r => setTimeout(r, SCREENSHOT_DELAY_MS));
+
+      const ss = takeScreenshot(cn);
+      let winName = "";
+      try { winName = dockerExec(`xdotool getwindowname ${targetWid}`, 5000, cn).toString().trim(); } catch {}
+      return {
+        content: [
+          { type: "image", data: ss.data, mimeType: ss.mimeType },
+          { type: "text", text: `Resized window ${targetWid} ("${winName}") to ${width}x${height} (display: ${dw}x${dh})` }
+        ]
+      };
+    } catch (err) {
+      return { content: [{ type: "text", text: `Window resize error: ${err.message}` }], isError: true };
+    }
+  }
+);
+
+// === Window Manage Tool ===
+
+server.tool(
+  "computer_window_manage",
+  `Manage window state: minimize, maximize, restore, close, or raise a window.
+Use with computer_window_list to discover window IDs and titles.`,
+  {
+    action: z.enum(["minimize", "maximize", "restore", "close", "raise"]).describe("Window action: minimize (hide), maximize (fill screen), restore (unmaximize), close (destroy), raise (bring to front without focusing)"),
+    title: z.string().optional().describe("Window title substring to match (case-insensitive). First match is acted on."),
+    window_id: z.number().optional().describe("Exact X window ID (from computer_window_list)."),
+    container_name: z.string().optional().describe("Target container (default: primary)"),
+  },
+  async ({ action, title, window_id, container_name }) => {
+    try {
+      const cn = resolveContainer(container_name);
+      if (!title && !window_id) throw new Error("Provide either title or window_id");
+
+      let targetWid;
+      if (window_id) {
+        targetWid = String(window_id);
+      } else {
+        const wids = dockerExec("xdotool search --onlyvisible --name ''", 10000, cn)
+          .toString().trim().split("\n").filter(Boolean);
+        for (const wid of wids) {
+          try {
+            const name = dockerExec(`xdotool getwindowname ${wid}`, 5000, cn).toString().trim();
+            if (name.toLowerCase().includes(title.toLowerCase())) {
+              targetWid = wid;
+              break;
+            }
+          } catch { /* skip inaccessible windows */ }
+        }
+        if (!targetWid) throw new Error(`No window matching "${title}" found`);
+      }
+
+      let resultText;
+      switch (action) {
+        case "minimize":
+          dockerExec(`xdotool windowminimize ${targetWid}`, 10000, cn);
+          resultText = "minimized";
+          break;
+        case "maximize": {
+          // First activate, then get screen dimensions and resize+move to fill
+          dockerExec(`xdotool windowactivate ${targetWid}`, 10000, cn);
+          const env = environments.get(cn);
+          const w = env?.width || DISPLAY_WIDTH;
+          const h = env?.height || DISPLAY_HEIGHT;
+          dockerExec(`xdotool windowmove ${targetWid} 0 0`, 10000, cn);
+          dockerExec(`xdotool windowsize ${targetWid} ${w} ${h}`, 10000, cn);
+          resultText = `maximized (${w}x${h})`;
+          break;
+        }
+        case "restore":
+          // Unminimize (activate) + resize to reasonable default
+          dockerExec(`xdotool windowactivate ${targetWid}`, 10000, cn);
+          const env2 = environments.get(cn);
+          const rw = Math.round((env2?.width || DISPLAY_WIDTH) * 0.6);
+          const rh = Math.round((env2?.height || DISPLAY_HEIGHT) * 0.7);
+          dockerExec(`xdotool windowsize ${targetWid} ${rw} ${rh}`, 10000, cn);
+          dockerExec(`xdotool windowmove ${targetWid} 50 30`, 10000, cn);
+          resultText = `restored (${rw}x${rh})`;
+          break;
+        case "close":
+          dockerExec(`xdotool windowclose ${targetWid}`, 10000, cn);
+          resultText = "closed";
+          break;
+        case "raise":
+          dockerExec(`xdotool windowraise ${targetWid}`, 10000, cn);
+          resultText = "raised";
+          break;
+      }
+
+      await new Promise(r => setTimeout(r, SCREENSHOT_DELAY_MS));
+      const ss = takeScreenshot(cn);
+      let winName = "";
+      try { winName = dockerExec(`xdotool getwindowname ${targetWid}`, 5000, cn).toString().trim(); } catch {}
+      return {
+        content: [
+          { type: "image", data: ss.data, mimeType: ss.mimeType },
+          { type: "text", text: `Window ${targetWid} ("${winName}"): ${resultText}` }
+        ]
+      };
+    } catch (err) {
+      return { content: [{ type: "text", text: `Window manage error: ${err.message}` }], isError: true };
+    }
+  }
+);
+
 server.tool(
   "computer_process_list",
   "List running processes inside a computer-use container. Returns a process table (PID, CPU%, MEM%, command). Useful for debugging, finding stuck processes, or checking what's running.",
