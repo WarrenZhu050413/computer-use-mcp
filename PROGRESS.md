@@ -279,9 +279,72 @@ Major feature: spawn/destroy independent virtual desktop environments on demand.
 - 8 MCP tools total: computer, computer_bash, computer_status, computer_env_create, computer_env_destroy, computer_env_list
 
 ### Next Steps
-- [ ] Resolution switching (with coordinate scaling for > 1568px)
+- [x] Resolution switching (with coordinate scaling for > 1568px) → ✅ cycle 7
+- [x] Per-environment resolution → ✅ cycle 7
 - [ ] `display_number` param support
-- [ ] Per-environment resolution (currently all share DISPLAY_WIDTH/HEIGHT)
 - [ ] Session recording/replay
 - [ ] File exchange helpers via /workspace
 - [ ] Browser automation helpers
+
+---
+
+## Cycle 7 (2026-03-08)
+
+### Resolution Switching with Coordinate Scaling
+Major feature: live display resolution changes and Anthropic-spec coordinate scaling.
+
+**New Tool:**
+- `computer_env_resize` — change display resolution of any environment (kills/restarts Xvfb + x11vnc + XFCE)
+
+**Coordinate Scaling (Anthropic Spec):**
+- Max 1568px on longest edge in API coordinate space
+- Displays > 1568px: screenshots auto-downscaled, coordinates auto-mapped
+- Example: 1920x1080 display → API space is 1568x882
+- Scale factor: `1568 / max(width, height)`
+- All coordinate-accepting actions (click, drag, scroll, mouse_move, mouse_down/up) scale correctly
+- `cursor_position` returns API-space coordinates
+- `zoom` region coordinates scaled from API to display space
+
+**Per-Environment Resolution:**
+- Each environment tracks its own `width` and `height`
+- `computer_env_create` accepts optional `width`/`height` params
+- `SCREEN_RESOLUTION` env var passed to container for initial resolution
+- `computer_status` shows both display and API resolution when scaled
+- `computer_env_list` shows resolution per environment
+- Auto-recovery preserves per-env resolution
+
+**Docker Image Changes:**
+- `start.sh` accepts `SCREEN_RESOLUTION` env var (default: 1024x768)
+- `start.sh` uses `set +e` + `while true; do wait -n; done` to survive child process kills (required for resize)
+- `trap "exit 0" SIGTERM SIGINT` for clean container shutdown
+
+**Debugging Findings:**
+- Killing Xvfb (PID child of PID 1) caused PID 1 (start.sh with `set -e` + `wait`) to exit → container crash. Fixed with `set +e` before wait loop.
+- `pkill` inside `docker exec` can return 143 (SIGTERM propagation) even with `|| true`. Wrapped kill commands in try/catch.
+- XFCE desktop dies when Xvfb is killed (X clients lose connection). Must restart `startxfce4` after Xvfb restart.
+
+### Verification Results
+- **Default 1024x768**: ✅ No scaling, screenshot captured correctly
+- **Resize to 1280x720**: ✅ Display confirmed, XFCE desktop renders
+- **Resize to 1920x1080**: ✅ API reports 1568x882, coordinate scaling works
+- **Click after resize**: ✅ API [40,10] → opened Applications menu on 1920x1080 display
+- **env_create at 1920x1080**: ✅ Container created at correct resolution, scaling active
+- **Status display**: ✅ Shows "Resolution: 1920x1080 (API: 1568x882, scaled)"
+
+### Commits
+1. `dd174b9` — feat: resolution switching with coordinate scaling (Anthropic spec)
+2. `fa8dd71` — fix: remove nested bash -c in env_resize (dockerExec already wraps)
+3. `caf6648` — fix: resilient resize — try/catch kill commands, pkill over pgrep+kill
+4. `816a29c` — feat: restart XFCE desktop after resize
+
+### Code Stats
+- MCP server: 818 lines (up from 681)
+- 9 MCP tools: computer, computer_bash, computer_status, computer_env_create, computer_env_destroy, computer_env_list, computer_env_resize
+- Server version: 1.2.0
+
+### Next Steps
+- [ ] `display_number` param support
+- [ ] Session recording/replay
+- [ ] File exchange helpers via /workspace
+- [ ] Browser automation helpers
+- [ ] Real-world usage test at high resolution
