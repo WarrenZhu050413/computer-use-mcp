@@ -550,8 +550,54 @@ New convenience tools that reduce multi-step workflows to single tool calls.
 - Server version: 1.6.0
 
 ### Next Steps
+- [x] Edge case testing: unicode → ✅ cycle 12
+- [x] Install iproute2 in Docker image → ✅ cycle 12
 - [ ] Session recording/replay
-- [ ] Edge case testing: large files, unicode filenames, symlinks
 - [ ] Keyboard shortcut helper (common shortcuts as named actions)
-- [ ] Install iproute2 in Docker image (missing `ip` command)
 - [ ] `computer_type_file` — type large content via file (bypass xdotool limits)
+
+---
+
+## Cycle 12 (2026-03-08)
+
+### Unicode Type Support + Key Action Fix
+Two bugs found and fixed through edge case testing:
+
+**Bug 1: `type` action crashes on non-ASCII text**
+- `xdotool type --file` throws "Invalid multi-byte sequence" for CJK, emoji, accented chars
+- **Fix**: Detect non-ASCII (`/[^\x00-\x7F]/`), fall back to clipboard paste (xclip + ctrl+shift+v)
+- Saves/restores original clipboard around paste operation
+- ASCII text still uses fast `xdotool type --file` path
+
+**Bug 2: `key` action `--clearmodifiers` breaks modifier combos**
+- `xdotool key --clearmodifiers -- ctrl+shift+v` silently strips modifiers
+- Confirmed: `xdotool key ctrl+shift+v` (no --clearmodifiers) works correctly
+- **Fix**: Removed `--clearmodifiers` from `key` action entirely
+
+### Docker Image Improvements
+- Added `locales` + `locale-gen en_US.UTF-8` (ENV LANG/LC_ALL set)
+- Added `fonts-noto-cjk` (Chinese/Japanese/Korean font support)
+- Added `fonts-noto-color-emoji` (emoji rendering)
+- Added `iproute2` (ip, ss commands)
+- Container now supports full Unicode rendering in terminal and GUI apps
+
+### Verification Results
+- **Key ctrl+shift+v**: ✅ Pasted "PASTE_VIA_KEY_ACTION" from clipboard correctly
+- **Type unicode**: ✅ `echo "Hello 世界 café 🌍"` typed and executed, output rendered correctly
+- **Type ASCII**: ✅ Standard ASCII text types normally via xdotool
+- **Docker locale**: ✅ LANG=en_US.UTF-8, Noto CJK + Color Emoji fonts, iproute2 6.1.0
+
+### Commits
+1. `3dfd9f4` — fix: unicode type support + key action --clearmodifiers bug
+
+### Code Stats
+- MCP server: ~1286 lines (up from ~1250)
+- 17 MCP tools (unchanged)
+- Server version: 1.7.0
+
+### Next Steps
+- [ ] Session recording/replay
+- [ ] Keyboard shortcut helper (common shortcuts as named actions)
+- [ ] `computer_type_file` — type large content via file (bypass xdotool limits)
+- [ ] Edge case testing: large files, special filenames, symlinks
+- [ ] Unicode type in GUI apps (mousepad, Firefox) — currently uses ctrl+shift+v (terminal-focused)
