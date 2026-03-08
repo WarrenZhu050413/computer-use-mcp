@@ -2433,7 +2433,52 @@ Added `ensure_visible` param (default: `true`) to:
 - Server version: 1.40.0
 
 ### Next Steps
-- [ ] Performance: reduce screenshot latency on high-frequency operations
 - [ ] A11y form validation reading (read error messages after submit)
 - [ ] Smart form fill: combine a11y_fill + a11y_select in one call
-- [ ] Monitor for Anthropic API updates
+
+## Cycle 53 (2026-03-08)
+
+### Refactoring
+
+#### DRY: extract filterA11yNodes() helper (440c60f)
+Extracted duplicated a11y node filtering logic into `filterA11yNodes()` — a pure function (no I/O) that matches nodes by role/name with exact_role and require_bbox options.
+
+**4 call sites consolidated**:
+- `queryA11yFlat()` — now delegates filtering to `filterA11yNodes()`
+- `computer_a11y_read` — replaced 30 lines of inline a11y query+parse+filter with a single `queryA11yFlat()` call
+- `computer_a11y_select` — per-element filtering uses `filterA11yNodes()` instead of inline filter
+- `computer_a11y_fill` — per-field filtering uses `filterA11yNodes()` instead of inline filter
+
+**queryA11yFlat() new params**:
+- `include_text` (default true) — passes `--no-text` to a11y_tree.py when false
+- `require_bbox` (default true) — when false, returns elements without valid bboxes (used by a11y_read)
+
+Net: -41 lines (28 added, 69 removed). Behavior-preserving.
+
+### Bug Fixes
+
+#### Fix: a11y_fill autocomplete mis-targeting (c474670)
+Firefox autocomplete dropdowns could intercept clicks on subsequent form fields, causing typed text to land in the wrong field.
+
+- **Before**: Filling Customer name → Telephone → E-mail on httpbin form, "555-1234" (telephone value) ended up in Customer name field
+- **After**: All 3 fields correctly filled: Customer name="Alice Smith", Telephone="555-9876", E-mail="alice@example.com"
+- **Fix**: Press Escape between fields to dismiss autocomplete dropdown before clicking next field
+
+### Research: Anthropic Spec Compliance (March 2026)
+- **Computer Use**: No changes since `computer_20251124`. All 16 actions stable. 100% compliant.
+- **Text Editor**: No changes since `text_editor_20250728`. Our implementation fully compliant.
+- **Competitors**: No new computer use MCP servers found. 49 tools exceeds all competitors.
+
+### Commits
+1. `440c60f` — refactor: extract filterA11yNodes() — DRY a11y node filtering across 4 tools
+2. `c474670` — fix: dismiss autocomplete between a11y_fill fields to prevent mis-targeting
+
+### Code Stats
+- MCP server: ~6095 lines (-45 net from DRY refactor)
+- 49 MCP tools (unchanged)
+- Server version: 1.45.0
+
+### Next Steps
+- [ ] A11y form validation reading (read error messages after submit)
+- [ ] Smart form fill: combine a11y_fill + a11y_select in one call
+- [ ] Session management improvements
