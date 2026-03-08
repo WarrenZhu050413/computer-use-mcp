@@ -22,6 +22,7 @@ const DEFAULT_DISPLAY_NUMBER = parseInt(process.env.DISPLAY_NUMBER || "1", 10);
 const TYPING_DELAY_MS = 12;
 const MAX_RESPONSE_LEN = 16000;
 const MAX_API_DIMENSION = 1568; // Anthropic spec: max longest edge in API space
+const MAX_API_PIXELS = 1_150_000; // Anthropic spec: max ~1.15 megapixels total
 
 // === Session recording ===
 const activeSessions = new Map(); // sessionName -> { name, container, started, actions[] }
@@ -69,9 +70,9 @@ environments.set(DEFAULT_CONTAINER, {
 // === Coordinate scaling (Anthropic spec: max 1568px on longest edge) ===
 
 function getScaleFactor(width, height) {
-  const longest = Math.max(width, height);
-  if (longest <= MAX_API_DIMENSION) return 1;
-  return MAX_API_DIMENSION / longest;
+  const longEdgeScale = MAX_API_DIMENSION / Math.max(width, height);
+  const totalPixelsScale = Math.sqrt(MAX_API_PIXELS / (width * height));
+  return Math.min(1, longEdgeScale, totalPixelsScale);
 }
 
 function getApiDimensions(containerName = DEFAULT_CONTAINER) {
