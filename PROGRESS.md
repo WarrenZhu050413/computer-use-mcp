@@ -495,8 +495,63 @@ New MCP tools for inspecting and managing processes inside containers.
 - Server version: 1.5.0
 
 ### Next Steps
+- [x] Browser automation helpers (navigate to URL, wait for page load) → ✅ cycle 11
 - [ ] Session recording/replay
-- [ ] Browser automation helpers (navigate to URL, wait for page load)
 - [ ] Edge case testing: large files, unicode filenames, symlinks
 - [ ] Keyboard shortcut helper (common shortcuts as named actions)
 - [ ] Install iproute2 in Docker image (missing `ip` command)
+
+---
+
+## Cycle 11 (2026-03-08)
+
+### Browser & Application Helpers
+New convenience tools that reduce multi-step workflows to single tool calls.
+
+**New Tools:**
+- `computer_navigate` — open URL in Firefox inside container
+  - Auto-detects browser binary (`firefox-esr` or `firefox`)
+  - Opens in new tab by default, optional `new_window` mode
+  - Auto-prepends `https://` if no scheme provided
+  - Configurable wait time for page load (1-30s, default 3)
+  - Returns screenshot after page load
+- `computer_open` — launch applications or open files
+  - Detects file paths (uses `xdg-open`) vs application names (direct command)
+  - Optional arguments for app commands
+  - Configurable wait time before screenshot (1-30s, default 2)
+  - Returns screenshot after launch
+
+**Why this matters:**
+- Before: Navigate to URL required 4+ actions (click address bar → triple-click → type URL → Enter)
+- After: `computer_navigate(url="example.com")` — one call
+- Before: Open terminal required searching taskbar or keyboard shortcut
+- After: `computer_open(target="xfce4-terminal")` — one call
+- Drastically reduces token usage and latency for common operations
+
+### Bug Fix: process_list grep exit code
+- `computer_process_list` with a filter that matches no processes returned an error (grep exit code 1)
+- Now returns `(no processes matching 'filter')` — friendly message, not an error
+- Detects grep exit codes 1 and 123 (no match) vs real errors (non-zero + stderr)
+
+### Verification Results
+- **computer_navigate**: ✅ Opened `https://example.com` in new Firefox tab, screenshot shows page
+- **computer_open**: ✅ Launched `xfce4-terminal`, screenshot shows terminal with shell prompt
+- **process_list no-match**: ✅ Filter "nonexistent_process_xyz" returns friendly message, not error
+- **Real-world dogfooding**: ✅ Full flow: navigate → terminal → write Python script → run → file_read output
+
+### Commits
+1. `40b99b7` — feat: browser helpers + process_list fix (v1.6.0)
+2. `b3a9901` — fix: use correct takeScreenshot return fields in navigate/open tools
+3. `ea9336b` — fix: auto-detect firefox binary name in computer_navigate
+
+### Code Stats
+- MCP server: ~1250 lines (up from ~1144)
+- 15 MCP tools + 2 new helpers = 17 MCP tools: computer, computer_bash, computer_status, computer_clipboard, computer_window_list, computer_file_read, computer_file_write, computer_process_list, computer_process_kill, computer_navigate, computer_open, computer_env_create, computer_env_destroy, computer_env_list, computer_env_resize, computer_env_resize
+- Server version: 1.6.0
+
+### Next Steps
+- [ ] Session recording/replay
+- [ ] Edge case testing: large files, unicode filenames, symlinks
+- [ ] Keyboard shortcut helper (common shortcuts as named actions)
+- [ ] Install iproute2 in Docker image (missing `ip` command)
+- [ ] `computer_type_file` — type large content via file (bypass xdotool limits)
