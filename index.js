@@ -300,6 +300,20 @@ function clipboardPaste(content, containerName = DEFAULT_CONTAINER) {
   const tmpPath = `/tmp/_cp_${id}.txt`;
   dockerExec(`echo '${b64}' | base64 -d > '${tmpPath}' && cat '${tmpPath}' | xclip -selection clipboard -i && rm -f '${tmpPath}'`, 30000, containerName);
 
+  // Verify clipboard content was set correctly (read back and compare)
+  // Only verify for content up to 10KB — larger content is too expensive to round-trip
+  if (content.length <= 10240) {
+    try {
+      const verifyPath = `/tmp/_cp_verify_${id}.txt`;
+      dockerExec(`xclip -selection clipboard -o > '${verifyPath}' 2>/dev/null`, 5000, containerName);
+      const readBack = dockerExec(`cat '${verifyPath}' && rm -f '${verifyPath}'`, 5000, containerName).toString();
+      if (readBack !== content) {
+        // Retry once — clipboard can be racy with X11 selection events
+        dockerExec(`echo '${b64}' | base64 -d > '${tmpPath}' && cat '${tmpPath}' | xclip -selection clipboard -i && rm -f '${tmpPath}'`, 30000, containerName);
+      }
+    } catch { /* verification failed — proceed anyway, paste may still work */ }
+  }
+
   // Detect terminal vs GUI for correct paste shortcut
   // Check both window name and WM_CLASS (more reliable than title alone)
   let isTerminal = false;
@@ -2976,16 +2990,17 @@ Reads the file, sets the clipboard, pastes with the correct shortcut (auto-detec
 // === computer_macro — define and replay named action sequences ===
 server.tool(
   "computer_macro",
-  `Define, run, list, or delete reusable named action sequences (macros).
+  `Define, run, list, edit, or delete reusable named action sequences (macros).
 Macros are named sequences of computer actions that can be replayed on demand — like keyboard macros but for the full desktop.
 - "save": Define a macro from a JSON array of actions, or convert a session recording into a macro.
 - "run": Execute a saved macro. Supports repeat count and speed multiplier.
+- "edit": Replace the actions in an existing macro. Preserves name and metadata, updates actions/description/count.
 - "list": Show all saved macros with action counts.
 - "delete": Remove a macro by name, or all macros with name="all".
 Macros are stored in /workspace/.macros/ as JSON files.
 Actions format: [{"action":"key","text":"ctrl+t"},{"action":"type","text":"example.com"},{"action":"key","text":"Return"}]`,
   {
-    mode: z.enum(["save", "run", "list", "delete"]).describe("Operation mode"),
+    mode: z.enum(["save", "run", "list", "edit", "delete"]).describe("Operation mode"),
     name: z.string().optional().describe("Macro name (required for save/run/delete). Alphanumeric, dashes, underscores only."),
     actions: z.string().optional().describe("JSON array of actions for 'save' mode. Each action: {action, coordinate?, text?, scroll_direction?, scroll_amount?, start_coordinate?, duration?}"),
     from_session: z.string().optional().describe("Convert a saved session into a macro (session name). Alternative to 'actions' for save mode."),
@@ -3146,6 +3161,66 @@ Actions format: [{"action":"key","text":"ctrl+t"},{"action":"type","text":"examp
 
         return {
           content: [{ type: "text", text: `Macro '${name}' saved (${parsedActions.length} actions: ${desc})${from_session ? ` [from session '${from_session}']` : ""}\nRun with: computer_macro(mode="run", name="${name}")` }]
+        };
+      }
+
+      if (mode === "edit") {
+        // Load existing macro, replace its actions
+        if (!actions) {
+          return { content: [{ type: "text", text: "Error: 'actions' (JSON array) is required for edit mode" }], isError: true };
+        }
+        let existingData;
+        try {
+          const raw = dockerExec(`cat '${macroPath}'`, 10000, cn).toString();
+          existingData = JSON.parse(raw);
+        } catch {
+          return { content: [{ type: "text", text: `Macro '${name}' not found. Use mode='save' to create it first.` }], isError: true };
+        }
+
+        // Parse and validate new actions
+        let parsedActions;
+        try {
+          parsedActions = JSON.parse(actions);
+          if (!Array.isArray(parsedActions)) {
+            return { content: [{ type: "text", text: "Error: 'actions' must be a JSON array" }], isError: true };
+          }
+        } catch (err) {
+          return { content: [{ type: "text", text: `Error parsing actions JSON: ${err.message}` }], isError: true };
+        }
+        const validActions = ["screenshot", "left_click", "right_click", "middle_click", "double_click",
+          "triple_click", "left_click_drag", "type", "key", "mouse_move", "scroll",
+          "left_mouse_down", "left_mouse_up", "hold_key", "wait", "zoom", "cursor_position"];
+        for (let i = 0; i < parsedActions.length; i++) {
+          const a = parsedActions[i];
+          if (!a.action || !validActions.includes(a.action)) {
+            return { content: [{ type: "text", text: `Error: action[${i}] has invalid action '${a.action}'. Valid: ${validActions.join(", ")}` }], isError: true };
+          }
+        }
+        if (parsedActions.length === 0) {
+          return { content: [{ type: "text", text: "Error: macro must have at least one action" }], isError: true };
+        }
+
+        // Build updated description
+        const actionCounts = {};
+        for (const a of parsedActions) {
+          actionCounts[a.action] = (actionCounts[a.action] || 0) + 1;
+        }
+        const desc = Object.entries(actionCounts).map(([k, v]) => `${v}x ${k}`).join(", ");
+
+        const oldCount = (existingData.actions || []).length;
+        existingData.actions = parsedActions;
+        existingData.action_count = parsedActions.length;
+        existingData.description = desc;
+        existingData.modified = new Date().toISOString();
+
+        // Write updated macro
+        const tmpPath = `/tmp/_macro_${randomUUID().slice(0, 8)}.json`;
+        const macroJson = JSON.stringify(existingData, null, 2);
+        const b64 = Buffer.from(macroJson).toString("base64");
+        dockerExec(`echo '${b64}' | base64 -d > '${tmpPath}' && mv '${tmpPath}' '${macroPath}'`, 10000, cn);
+
+        return {
+          content: [{ type: "text", text: `Macro '${name}' updated: ${oldCount} → ${parsedActions.length} actions (${desc})` }]
         };
       }
 
