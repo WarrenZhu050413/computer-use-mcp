@@ -527,7 +527,7 @@ function executeAction({ action, coordinate, text, scroll_direction, scroll_amou
 
 const server = new McpServer({
   name: "computer-use",
-  version: "1.33.0",
+  version: "1.34.0",
 });
 
 const actionSchema = {
@@ -1883,9 +1883,10 @@ server.tool(
     url: z.string().describe("URL to navigate to (e.g. 'https://example.com')"),
     wait_seconds: z.number().optional().describe("Seconds to wait for page load before screenshot (default: 3)"),
     new_window: z.boolean().optional().describe("Open in a new window instead of a new tab (default: false)"),
+    extract_content: z.boolean().optional().describe("If true, also extract page title and text content via select-all + clipboard (default: false)"),
     container_name: z.string().optional().describe("Target container (default: primary)"),
   },
-  async ({ url, wait_seconds, new_window, container_name }) => {
+  async ({ url, wait_seconds, new_window, extract_content, container_name }) => {
     try {
       const cn = resolveContainer(container_name);
       const waitSec = Math.min(Math.max(wait_seconds || 3, 1), 30);
@@ -1919,12 +1920,64 @@ server.tool(
 
       // Take screenshot
       const ss = takeScreenshot(cn);
-      return {
-        content: [
-          { type: "image", data: ss.data, mimeType: ss.mimeType },
-          { type: "text", text: `Navigated to ${targetUrl} (${ss.apiWidth}x${ss.apiHeight}, waited ${waitSec}s)` }
-        ]
-      };
+      const contentParts = [
+        { type: "image", data: ss.data, mimeType: ss.mimeType },
+      ];
+
+      let summary = `Navigated to ${targetUrl} (${ss.apiWidth}x${ss.apiHeight}, waited ${waitSec}s)`;
+
+      // Extract page content if requested
+      if (extract_content) {
+        // Get page title from Firefox window title (format: "Page Title — Mozilla Firefox")
+        let pageTitle = "";
+        try {
+          const activeWin = dockerExec("xdotool getactivewindow", 5000, cn).toString().trim();
+          const winName = dockerExec(`xdotool getwindowname ${activeWin} 2>/dev/null || echo ""`, 5000, cn).toString().trim();
+          // Strip " — Mozilla Firefox" or " - Mozilla Firefox" suffix
+          pageTitle = winName.replace(/\s*[—–-]\s*Mozilla Firefox\s*$/, "").trim();
+        } catch {}
+
+        // Extract text via select-all + copy clipboard
+        let pageText = "";
+        let originalClipboard = "";
+        try {
+          originalClipboard = dockerExec(`xclip -selection clipboard -o 2>/dev/null || true`, 5000, cn).toString();
+        } catch {}
+
+        try {
+          // Browser uses ctrl+a / ctrl+c (not terminal shortcuts)
+          xdotool("key ctrl+a", cn);
+          execFileSync("sleep", ["0.3"]);
+          xdotool("key ctrl+c", cn);
+          execFileSync("sleep", ["0.3"]);
+          // Deselect
+          xdotool("key Right", cn);
+
+          pageText = dockerExec(`xclip -selection clipboard -o 2>/dev/null || echo ""`, 30000, cn).toString();
+        } catch (err) {
+          pageText = `(content extraction failed: ${err.message})`;
+        }
+
+        // Restore clipboard in background
+        if (originalClipboard && originalClipboard !== pageText) {
+          const b64Orig = Buffer.from(originalClipboard).toString("base64");
+          const id = randomUUID().slice(0, 8);
+          const origPath = `/tmp/_cp_nav_${id}.txt`;
+          try {
+            dockerExec(`nohup bash -c 'sleep 1 && echo '"'"'${b64Orig}'"'"' | base64 -d > '"'"'${origPath}'"'"' && cat '"'"'${origPath}'"'"' | xclip -selection clipboard -i && rm -f '"'"'${origPath}'"'"'' >/dev/null 2>&1 &`, 5000, cn);
+          } catch {}
+        }
+
+        // Truncate page text if too long
+        const maxLen = MAX_RESPONSE_LEN;
+        const truncated = pageText.length > maxLen;
+        const displayText = truncated ? pageText.slice(0, maxLen) + `\n\n[... truncated, ${pageText.length} chars total]` : pageText;
+
+        summary += `\n\nTitle: ${pageTitle || "(unknown)"}\n\n--- Page Content ---\n${displayText || "(no text extracted)"}`;
+      }
+
+      contentParts.push({ type: "text", text: summary });
+      return { content: contentParts };
     } catch (err) {
       return {
         content: [{ type: "text", text: `Navigate error: ${err.message}` }],
@@ -4878,6 +4931,117 @@ server.tool(
       };
     } catch (err) {
       return { content: [{ type: "text", text: `Accessibility error: ${err.message}` }], isError: true };
+    }
+  }
+);
+
+// === Accessibility-Driven Interaction ===
+
+server.tool(
+  "computer_a11y_click",
+  "Click a UI element by its accessibility role and/or name, without needing to know coordinates. Queries the AT-SPI2 accessibility tree to find the element, then clicks at its center. Much more reliable than OCR+click for buttons, links, menus, text fields, etc. Supports filtering by app/window to narrow the search.",
+  {
+    role: z.string().optional().describe("Accessibility role to match (case-insensitive): 'push button', 'link', 'menu item', 'text', 'check box', 'radio button', 'combo box', 'tab', 'toggle button', etc."),
+    name: z.string().optional().describe("Element name/label to match (substring, case-insensitive). E.g. 'Submit', 'Login', 'File', 'Search'"),
+    app: z.string().optional().describe("Filter by application name (e.g. 'Firefox', 'xfce4-terminal')"),
+    window_title: z.string().optional().describe("Filter by window title substring"),
+    click_type: z.enum(["left_click", "right_click", "double_click"]).default("left_click").describe("Type of click to perform (default: left_click)"),
+    index: z.number().optional().describe("If multiple elements match, click the Nth one (0-based, default 0 = first match)"),
+    container_name: z.string().optional().describe("Target container (default: primary)"),
+  },
+  async ({ role, name, app, window_title, click_type, index, container_name }) => {
+    const cn = container_name || DEFAULT_CONTAINER;
+    try {
+      if (!role && !name) {
+        return { content: [{ type: "text", text: "Error: at least one of 'role' or 'name' must be specified" }], isError: true };
+      }
+
+      // Build a11y tree query — use flat mode for easier searching
+      let cmd = "python3 /usr/local/bin/a11y_tree.py --compact --flat --depth 20";
+      if (app) {
+        cmd += ` --app '${app.replace(/'/g, "'\\''")}'`;
+      } else if (window_title) {
+        cmd += ` --window-title '${window_title.replace(/'/g, "'\\''")}'`;
+      }
+
+      const fullCmd = `DBUS_SESSION_BUS_ADDRESS=$(cat /tmp/dbus-session 2>/dev/null || echo "") GTK_MODULES=gail:atk-bridge ${cmd}`;
+      const output = dockerExec(fullCmd, 60000, cn).toString().trim();
+
+      let result;
+      try {
+        result = JSON.parse(output);
+      } catch {
+        return { content: [{ type: "text", text: `Failed to parse a11y tree: ${output.slice(0, 500)}` }], isError: true };
+      }
+
+      if (result.error) {
+        return { content: [{ type: "text", text: `AT-SPI2 error: ${result.error}${result.available ? '\nAvailable apps: ' + result.available.join(', ') : ''}` }], isError: true };
+      }
+
+      // Search flat nodes for matching elements
+      const nodes = result.nodes || [];
+      const matchRole = role ? role.toLowerCase() : null;
+      const matchName = name ? name.toLowerCase() : null;
+
+      const matches = nodes.filter(node => {
+        if (!node.bbox || node.bbox.width <= 0 || node.bbox.height <= 0) return false;
+        const nodeRole = (node.role || "").toLowerCase();
+        const nodeName = (node.name || "").toLowerCase();
+        if (matchRole && !nodeRole.includes(matchRole)) return false;
+        if (matchName && !nodeName.includes(matchName)) return false;
+        return true;
+      });
+
+      if (matches.length === 0) {
+        // Take screenshot to show what's visible
+        const ss = takeScreenshot(cn);
+        const searchDesc = [role && `role="${role}"`, name && `name="${name}"`].filter(Boolean).join(", ");
+        return {
+          content: [
+            { type: "image", data: ss.data, mimeType: ss.mimeType },
+            { type: "text", text: `No element found matching ${searchDesc}. ${nodes.length} nodes searched.${app ? ` App filter: "${app}"` : ""}${window_title ? ` Window filter: "${window_title}"` : ""}` }
+          ],
+          isError: true
+        };
+      }
+
+      // Select the target element
+      const targetIdx = Math.min(index || 0, matches.length - 1);
+      const target = matches[targetIdx];
+
+      // Convert bbox from display coords to API coords, then click at center
+      const env = environments.get(cn);
+      const dispW = env?.width || DISPLAY_WIDTH;
+      const dispH = env?.height || DISPLAY_HEIGHT;
+      const scaleFactor = getScaleFactor(dispW, dispH);
+
+      const apiX = Math.round((target.bbox.x + target.bbox.width / 2) * scaleFactor);
+      const apiY = Math.round((target.bbox.y + target.bbox.height / 2) * scaleFactor);
+
+      // Perform the click in display coordinates
+      const displayX = target.bbox.x + Math.round(target.bbox.width / 2);
+      const displayY = target.bbox.y + Math.round(target.bbox.height / 2);
+
+      const clickMap = {
+        left_click: `mousemove ${displayX} ${displayY} click 1`,
+        right_click: `mousemove ${displayX} ${displayY} click 3`,
+        double_click: `mousemove ${displayX} ${displayY} click --repeat 2 --delay 10 1`,
+      };
+      xdotool(clickMap[click_type || "left_click"], cn);
+
+      // Wait for reaction then screenshot
+      await new Promise(r => setTimeout(r, SCREENSHOT_DELAY_MS));
+      const ss = takeScreenshot(cn);
+
+      const matchInfo = matches.length > 1 ? ` (match ${targetIdx + 1}/${matches.length})` : "";
+      return {
+        content: [
+          { type: "image", data: ss.data, mimeType: ss.mimeType },
+          { type: "text", text: `Clicked ${target.role} "${target.name}" at [${apiX}, ${apiY}]${matchInfo}` }
+        ]
+      };
+    } catch (err) {
+      return { content: [{ type: "text", text: `A11y click error: ${err.message}` }], isError: true };
     }
   }
 );
