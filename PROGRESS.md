@@ -1440,8 +1440,69 @@ Implementation details:
 - Server version: 1.21.0
 
 ### Next Steps
-- [ ] `computer_window_tile` gap testing + cascade layout verification
+- [x] `computer_window_tile` gap testing + cascade layout verification → ✅ cycle 29
 - [ ] Terminal detection improvements (more shell/emulator patterns)
 - [ ] Clipboard paste verification (ensure content actually arrived)
 - [ ] Macro: add "edit" mode to modify existing macros
-- [ ] `computer_annotate` save_path verification + hex color testing
+- [x] `computer_annotate` save_path verification + hex color testing → ✅ cycle 29
+
+---
+
+## Cycle 29 (2026-03-08)
+
+### Critical Bug Fix: Window Discovery
+**Bug**: `getVisibleWindows()`, `findWindowByTitleOrId()`, and `computer_window_list` all used `xdotool search --onlyvisible --name ''` which matches ALL windows including dozens of unnamed XFCE internal windows. Since results were capped at first 30, actual app windows (Terminal, Firefox, Mousepad) were never reached — causing `computer_window_tile` to return "No windows found" despite multiple visible apps.
+
+**Fix**: Changed to `--name '.'` (regex: any character) to only match windows with non-empty names. Added `xfwm4` and `wrapper-` to skip patterns. Increased slice cap from 30 to 50. Applied to all 3 call sites.
+
+### Spec Compliance Fix: Coordinate Scaling
+**Bug**: Our `getScaleFactor()` only enforced the long edge constraint (`1568/max(w,h)`) but missed the Anthropic reference implementation's total pixels constraint (`sqrt(1,150,000 / (w*h))`). For 1920x1080, total pixels (0.745) is tighter than long edge (0.817) — would have sent oversized screenshots.
+
+**Fix**: Added `MAX_API_PIXELS = 1,150,000` constant and `totalPixelsScale` calculation. Scale factor is now `min(1, longEdgeScale, totalPixelsScale)` matching the Anthropic reference exactly.
+
+Verified across 6 resolutions:
+| Resolution | Long Edge | Total Pixels | Used | Scale |
+|-----------|-----------|-------------|------|-------|
+| 1024x768 | 1.531 | 1.209 | none | 1.000 |
+| 1920x1080 | 0.817 | 0.745 | tp | 0.745 |
+| 2560x1440 | 0.613 | 0.559 | tp | 0.559 |
+| 3840x2160 | 0.408 | 0.372 | tp | 0.372 |
+
+### Window Tile Verification
+- **Cascade**: 6 windows tiled with 30px diagonal offset ✓
+- **Grid + gap**: 3x2 grid with 10px spacing between windows ✓
+- **Left-right with title filter**: 2 windows side by side ✓
+
+### Annotate Tool Verification
+- Hex colors (#FF6600, #00FF00, #0088FF, #FF00FF) all render correctly ✓
+- save_path creates file at specified container path (95KB PNG) ✓
+- Mixed annotation types in single call (rect + arrow + text + circle + number + line) ✓
+
+### Real-World Dogfooding
+- Browsed GitHub anthropics/claude-quickstarts repo in Firefox
+- Navigated to computer-use-demo/tools directory
+- Typed unicode text (Chinese, emoji, accented) in Mousepad with real newlines ✓
+- Window management (focus, tile, maximize, close) all working ✓
+
+### Verification Results
+- **sc-113**: cascade layout with 6 windows ✅
+- **sc-114**: grid layout with gap=10 ✅
+- **sc-115**: window_list shows named app windows ✅
+- **sc-116**: window_focus by title ✅
+- **sc-117**: scaling math verified for 6 resolutions ✅
+
+### Commits
+1. `97dbabf` — fix: getVisibleWindows/findWindowByTitleOrId miss app windows due to xdotool --name '' returning unnamed XFCE internals first
+2. `f7ab1f7` — fix: add total pixels constraint to coordinate scaling (Anthropic spec compliance)
+
+### Code Stats
+- MCP server: ~3445 lines (up from ~3440)
+- 33 MCP tools (unchanged)
+- Server version: 1.22.0
+
+### Next Steps
+- [ ] Terminal detection improvements (more shell/emulator patterns)
+- [ ] Clipboard paste verification (ensure content actually arrived)
+- [ ] Macro: add "edit" mode to modify existing macros
+- [ ] Research: check Anthropic reference computer.py for new actions/params
+- [ ] text_editor tool (Anthropic spec: str_replace_based_edit_tool)
