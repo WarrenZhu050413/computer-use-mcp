@@ -301,10 +301,14 @@ function clipboardPaste(content, containerName = DEFAULT_CONTAINER) {
   dockerExec(`echo '${b64}' | base64 -d > '${tmpPath}' && cat '${tmpPath}' | xclip -selection clipboard -i && rm -f '${tmpPath}'`, 30000, containerName);
 
   // Detect terminal vs GUI for correct paste shortcut
+  // Check both window name and WM_CLASS (more reliable than title alone)
   let isTerminal = false;
   try {
-    const winName = dockerExec(`xdotool getactivewindow getwindowname 2>/dev/null || echo ""`, 5000, containerName).toString().trim().toLowerCase();
-    isTerminal = /terminal|xterm|rxvt|konsole|alacritty|kitty|tilix|sakura|lxterminal|terminator|urxvt/.test(winName);
+    const activeWin = dockerExec(`xdotool getactivewindow`, 5000, containerName).toString().trim();
+    const winName = dockerExec(`xdotool getwindowname ${activeWin} 2>/dev/null || echo ""`, 5000, containerName).toString().trim().toLowerCase();
+    const winClass = dockerExec(`xprop -id ${activeWin} WM_CLASS 2>/dev/null || echo ""`, 5000, containerName).toString().trim().toLowerCase();
+    isTerminal = /terminal|xterm|rxvt|konsole|alacritty|kitty|tilix|sakura|lxterminal|terminator|urxvt|st-256color|foot|wezterm/.test(winName)
+      || /xfce4-terminal|gnome-terminal|xterm|rxvt|konsole|alacritty|kitty|tilix|terminator|sakura|st-256color|foot|wezterm/.test(winClass);
   } catch { /* default to GUI paste */ }
 
   const pasteKey = isTerminal ? "ctrl+shift+v" : "ctrl+v";
@@ -3450,11 +3454,14 @@ function fileHistoryKey(containerName, filePath) {
 
 const TEXT_EDITOR_SNIPPET_LINES = 4;
 
-function makeNumberedOutput(fileContent, fileDescriptor, initLine = 1, expandTabs = true) {
+const TRUNCATED_MESSAGE = `<response clipped><NOTE>To save on context only part of this file has been shown to you. You should retry this tool after you have searched inside the file with 'grep -n' in order to find the line numbers of what you are looking for.</NOTE>`;
+
+function makeNumberedOutput(fileContent, fileDescriptor, initLine = 1, expandTabs = true, maxCharacters = null) {
   if (expandTabs) fileContent = fileContent.replace(/\t/g, "    ");
-  // Truncate if too long
-  if (fileContent.length > MAX_RESPONSE_LEN) {
-    fileContent = fileContent.slice(0, MAX_RESPONSE_LEN) + "\n... (truncated)";
+  // Truncate: use max_characters if provided, otherwise fall back to MAX_RESPONSE_LEN
+  const truncateAfter = maxCharacters || MAX_RESPONSE_LEN;
+  if (fileContent.length > truncateAfter) {
+    fileContent = fileContent.slice(0, truncateAfter) + TRUNCATED_MESSAGE;
   }
   const numbered = fileContent.split("\n").map((line, i) =>
     `${String(i + initLine).padStart(6)}\t${line}`
@@ -3482,9 +3489,10 @@ Paths must be absolute (start with /).`,
     new_str: z.string().optional().describe("Replacement text for 'str_replace' (omit or '' to delete old_str). Also used as insert content for older API compat."),
     insert_line: z.number().optional().describe("Line number for 'insert' (0=before first line, N=after line N)"),
     insert_text: z.string().optional().describe("Text to insert at insert_line"),
+    max_characters: z.number().optional().describe("Max characters to return for 'view' command. Content beyond this limit is truncated with a note."),
     container_name: z.string().optional().describe("Target container (default: primary)"),
   },
-  async ({ command, path: filePath, file_text, view_range, old_str, new_str, insert_line, insert_text, container_name }) => {
+  async ({ command, path: filePath, file_text, view_range, old_str, new_str, insert_line, insert_text, max_characters, container_name }) => {
     try {
       const cn = resolveContainer(container_name);
       const safePath = filePath.replace(/'/g, "'\\''");
@@ -3580,7 +3588,7 @@ Paths must be absolute (start with /).`,
             : lines.slice(start - 1, end).join("\n");
         }
 
-        return { content: [{ type: "text", text: makeNumberedOutput(fileContent, filePath, initLine) }] };
+        return { content: [{ type: "text", text: makeNumberedOutput(fileContent, filePath, initLine, true, max_characters) }] };
       }
 
       if (command === "create") {
