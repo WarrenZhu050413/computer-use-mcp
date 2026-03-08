@@ -4141,6 +4141,230 @@ Paths must be absolute (start with /).`,
   }
 );
 
+// === computer_snapshot — save/restore container state ===
+const SNAPSHOT_PREFIX = "cu-snapshot-";
+
+server.tool(
+  "computer_snapshot",
+  `Save, restore, list, or delete container state snapshots using docker commit.
+Use to checkpoint before risky operations, restore to a known state, or share environment setups.
+Snapshots preserve the full container filesystem (installed packages, open applications, file changes).
+Note: snapshots do NOT preserve running processes — after restore, desktop services restart fresh.`,
+  {
+    mode: z.enum(["save", "restore", "list", "delete"]).describe("save=checkpoint current state, restore=revert to snapshot, list=show all snapshots, delete=remove snapshot"),
+    name: z.string().optional().describe("Snapshot name (required for save/restore/delete). Alphanumeric + hyphens only."),
+    description: z.string().optional().describe("Description for the snapshot (save mode only)"),
+    container_name: z.string().optional().describe("Target container (default: primary)"),
+  },
+  async ({ mode, name, description, container_name }) => {
+    try {
+      const cn = resolveContainer(container_name);
+
+      if (mode === "list") {
+        try {
+          const output = execFileSync("docker", [
+            "images", "--format", "{{.Repository}}\t{{.Tag}}\t{{.Size}}\t{{.CreatedAt}}",
+            "--filter", `reference=${SNAPSHOT_PREFIX}*`
+          ], { timeout: 10000 }).toString().trim();
+
+          if (!output) {
+            return { content: [{ type: "text", text: "No snapshots found." }] };
+          }
+
+          const lines = output.split("\n").map(line => {
+            const [repo, tag, size, ...createdParts] = line.split("\t");
+            const snapshotName = repo.replace(SNAPSHOT_PREFIX, "");
+            const containerTag = tag === "<none>" ? "(default)" : tag;
+            // Read label for description
+            let desc = "";
+            try {
+              desc = execFileSync("docker", [
+                "inspect", "--format", "{{index .Config.Labels \"snapshot.description\"}}", `${repo}:${tag === "<none>" ? "latest" : tag}`
+              ], { timeout: 5000 }).toString().trim();
+            } catch {}
+            return `  ${snapshotName} (${containerTag}) — ${size}, ${createdParts.join("\t")}${desc ? ` — "${desc}"` : ""}`;
+          });
+
+          return { content: [{ type: "text", text: `Snapshots (${lines.length}):\n${lines.join("\n")}` }] };
+        } catch (err) {
+          return { content: [{ type: "text", text: `Error listing snapshots: ${err.message}` }], isError: true };
+        }
+      }
+
+      // All other modes require name
+      if (!name) {
+        return { content: [{ type: "text", text: `Error: 'name' is required for ${mode} mode.` }], isError: true };
+      }
+
+      // Validate name: alphanumeric + hyphens
+      if (!/^[a-zA-Z0-9][a-zA-Z0-9-]*$/.test(name)) {
+        return { content: [{ type: "text", text: "Error: snapshot name must be alphanumeric with hyphens (e.g. 'clean-state', 'firefox-setup')." }], isError: true };
+      }
+
+      const imageName = `${SNAPSHOT_PREFIX}${name}`;
+      const imageRef = `${imageName}:${cn}`;
+
+      if (mode === "save") {
+        // Check container is running
+        try {
+          const state = execFileSync("docker", ["inspect", "--format", "{{.State.Running}}", cn], { timeout: 5000 }).toString().trim();
+          if (state !== "true") {
+            return { content: [{ type: "text", text: `Error: container '${cn}' is not running.` }], isError: true };
+          }
+        } catch (err) {
+          return { content: [{ type: "text", text: `Error: container '${cn}' not found.` }], isError: true };
+        }
+
+        // Docker commit with optional description label
+        const commitArgs = ["commit"];
+        if (description) {
+          commitArgs.push("-c", `LABEL snapshot.description="${description.replace(/"/g, '\\"')}"`);
+        }
+        commitArgs.push("-c", `LABEL snapshot.container=${cn}`);
+        commitArgs.push("-c", `LABEL snapshot.timestamp=${new Date().toISOString()}`);
+        commitArgs.push(cn, imageRef);
+
+        execFileSync("docker", commitArgs, { timeout: 60000 });
+
+        // Get image size
+        let size = "unknown";
+        try {
+          size = execFileSync("docker", ["images", "--format", "{{.Size}}", imageRef], { timeout: 5000 }).toString().trim();
+        } catch {}
+
+        return {
+          content: [{ type: "text", text:
+            `Snapshot saved: ${name}\n` +
+            `Image: ${imageRef}\n` +
+            `Size: ${size}\n` +
+            `Container: ${cn}\n` +
+            (description ? `Description: ${description}\n` : "") +
+            `\nRestore with: computer_snapshot(mode="restore", name="${name}")`
+          }]
+        };
+      }
+
+      if (mode === "restore") {
+        // Check snapshot exists
+        try {
+          execFileSync("docker", ["inspect", "--type=image", imageRef], { timeout: 5000 });
+        } catch {
+          // Try without container tag (user may have saved from different container)
+          try {
+            execFileSync("docker", ["inspect", "--type=image", `${imageName}:latest`], { timeout: 5000 });
+            // Found with latest tag — but we need the right one
+          } catch {
+            return { content: [{ type: "text", text: `Error: snapshot '${name}' not found. Use mode="list" to see available snapshots.` }], isError: true };
+          }
+        }
+
+        const env = environments.get(cn);
+        if (!env) {
+          return { content: [{ type: "text", text: `Error: container '${cn}' not registered in environments.` }], isError: true };
+        }
+
+        // Stop and remove current container
+        try { execFileSync("docker", ["rm", "-f", cn], { timeout: 10000 }); } catch {}
+
+        // Run from snapshot image (preserves filesystem, restarts services via start.sh/entrypoint)
+        const envW = env.width || DISPLAY_WIDTH;
+        const envH = env.height || DISPLAY_HEIGHT;
+        execFileSync("docker", [
+          "run", "-d", "--name", cn,
+          "-e", `SCREEN_RESOLUTION=${envW}x${envH}`,
+          "-p", `${env.vncPort}:5900`,
+          "-p", `${env.novncPort}:6080`,
+          "-v", `${env.workspace}:/workspace`,
+          imageRef
+        ], { timeout: 30000 });
+
+        // Wait for display readiness
+        const dn = env.displayNumber || DEFAULT_DISPLAY_NUMBER;
+        let ready = false;
+        for (let i = 0; i < 15; i++) {
+          try {
+            execFileSync("docker", [
+              "exec", cn, "bash", "-c", `DISPLAY=:${dn} xdotool getdisplaygeometry`
+            ], { timeout: 5000 });
+            ready = true;
+            break;
+          } catch {}
+          execFileSync("sleep", ["1"]);
+        }
+
+        logRestart(cn, `snapshot-restore:${name}`, ready);
+
+        // Take screenshot to show restored state
+        let screenshot = null;
+        if (ready) {
+          await new Promise(r => setTimeout(r, 2000)); // extra wait for desktop
+          try { screenshot = takeScreenshot(cn); } catch {}
+        }
+
+        const content = [];
+        if (screenshot) {
+          content.push({ type: "image", data: screenshot.data, mimeType: screenshot.mimeType });
+        }
+        content.push({ type: "text", text:
+          `Snapshot restored: ${name}\n` +
+          `Container: ${cn}\n` +
+          `Display: ${ready ? "active" : "starting (may need more time)"}\n` +
+          `Note: Running processes were not preserved — only filesystem state.`
+        });
+
+        return { content };
+      }
+
+      if (mode === "delete") {
+        if (name === "all") {
+          // Delete all snapshots
+          try {
+            const output = execFileSync("docker", [
+              "images", "--format", "{{.Repository}}:{{.Tag}}",
+              "--filter", `reference=${SNAPSHOT_PREFIX}*`
+            ], { timeout: 10000 }).toString().trim();
+
+            if (!output) {
+              return { content: [{ type: "text", text: "No snapshots to delete." }] };
+            }
+
+            const images = output.split("\n").filter(Boolean);
+            let deleted = 0;
+            for (const img of images) {
+              try {
+                execFileSync("docker", ["rmi", img], { timeout: 10000 });
+                deleted++;
+              } catch {}
+            }
+            return { content: [{ type: "text", text: `Deleted ${deleted}/${images.length} snapshots.` }] };
+          } catch (err) {
+            return { content: [{ type: "text", text: `Error deleting snapshots: ${err.message}` }], isError: true };
+          }
+        }
+
+        // Delete specific snapshot (try with container tag first, then latest)
+        let deleted = false;
+        for (const tag of [cn, "latest"]) {
+          try {
+            execFileSync("docker", ["rmi", `${imageName}:${tag}`], { timeout: 10000 });
+            deleted = true;
+          } catch {}
+        }
+
+        if (!deleted) {
+          return { content: [{ type: "text", text: `Error: snapshot '${name}' not found.` }], isError: true };
+        }
+        return { content: [{ type: "text", text: `Snapshot '${name}' deleted.` }] };
+      }
+
+      return { content: [{ type: "text", text: `Error: unknown mode '${mode}'.` }], isError: true };
+
+    } catch (err) {
+      return { content: [{ type: "text", text: `Snapshot error: ${err.message}` }], isError: true };
+    }
+  }
+);
+
 // === computer_batch — execute multiple actions in a single call ===
 server.tool(
   "computer_batch",
