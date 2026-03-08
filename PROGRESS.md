@@ -439,8 +439,64 @@ New MCP tools for clipboard access and window discovery.
 - Server version: 1.4.0
 
 ### Next Steps
+- [x] Process management (list/kill processes in container) → ✅ cycle 10
 - [ ] Session recording/replay
 - [ ] Browser automation helpers (navigate to URL, wait for page load)
 - [ ] Edge case testing: large files, unicode filenames, symlinks
 - [ ] Keyboard shortcut helper (common shortcuts as named actions)
-- [ ] Process management (list/kill processes in container)
+
+---
+
+## Cycle 10 (2026-03-08)
+
+### Process Management Tools
+New MCP tools for inspecting and managing processes inside containers.
+
+**New Tools:**
+- `computer_process_list` — list running processes sorted by CPU usage
+  - Optional `filter` param for case-insensitive name search
+  - Returns full `ps aux` table (PID, CPU%, MEM%, command)
+  - Truncates at 16KB for large process tables
+- `computer_process_kill` — kill processes by PID or name
+  - PID mode: `kill -SIGNAL PID`
+  - Name mode: `pkill -SIGNAL -f NAME`
+  - Configurable signal (default: TERM, supports KILL, INT, HUP, etc.)
+  - Safety guards: refuses to kill Xvfb, x11vnc, xfce4-session, start.sh, bash
+  - Protects PID 1 (init/start.sh)
+  - Verification: checks if process is still running after kill
+
+**Why process management matters:**
+- Agents can diagnose hung/stuck applications (Firefox consuming 100% CPU)
+- Clean up test processes spawned by scripts
+- Monitor container resource usage
+- Kill specific browser tabs or stuck apps without restarting the entire container
+
+### Real-World Dogfooding
+- Opened xfce4-terminal via Ctrl+Alt+T ✅
+- Wrote multi-line bash script (heredoc) in terminal via `type` action ✅
+- Script gathered: date, hostname, kernel, arch, uptime, memory, disk, top processes, network
+- Ran script and saved output to `/workspace/sysinfo.txt` ✅
+- Read back output via `computer_file_read` — full roundtrip verified ✅
+- Minor finding: `ip` command not installed in container (no iproute2)
+
+### Verification Results
+- **Process list (unfiltered)**: ✅ Full `ps aux` table returned with all running processes
+- **Process list (filtered)**: ✅ `filter="firefox"` returns only Firefox processes
+- **Process kill by PID**: ✅ Spawned `sleep 300`, killed by PID, verified gone
+- **Protected process guard**: ✅ Attempting to kill "Xvfb" returns refusal with clear error
+- **PID 1 guard**: ✅ Attempting to kill PID 1 returns "Cannot kill PID 1"
+
+### Commits
+1. `65eb73a` — feat: process management tools (v1.5.0)
+
+### Code Stats
+- MCP server: ~1144 lines (up from ~1047)
+- 15 MCP tools: computer, computer_bash, computer_status, computer_clipboard, computer_window_list, computer_file_read, computer_file_write, computer_process_list, computer_process_kill, computer_env_create, computer_env_destroy, computer_env_list, computer_env_resize
+- Server version: 1.5.0
+
+### Next Steps
+- [ ] Session recording/replay
+- [ ] Browser automation helpers (navigate to URL, wait for page load)
+- [ ] Edge case testing: large files, unicode filenames, symlinks
+- [ ] Keyboard shortcut helper (common shortcuts as named actions)
+- [ ] Install iproute2 in Docker image (missing `ip` command)
