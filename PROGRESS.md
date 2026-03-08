@@ -810,7 +810,62 @@ New tool for waiting on display state changes. Essential for real computer autom
 - Server version: 1.10.0
 
 ### Next Steps
+- [x] OCR tools (computer_ocr + computer_find_text) → cycle 17
 - [ ] `computer_type_file` — type large content via file (bypass xdotool limits)
 - [ ] Edge case testing: large files, special filenames, symlinks
 - [ ] Session replay with screenshot comparison (diff against recorded screenshots)
 - [ ] `computer_scroll_to` — scroll until visual target appears (combines scroll + wait_for)
+
+---
+
+## Cycle 17 (2026-03-08)
+
+### OCR Tools — computer_ocr + computer_find_text
+Two new tools that enable agents to read and locate text on screen using tesseract OCR.
+
+**New Tools:**
+- `computer_ocr` — extract all text from the screen (or a region) using tesseract OCR
+  - Optional `region` param: [x1, y1, x2, y2] in API coordinates for targeted OCR
+  - Multi-language support: `language` param (default: "eng", supports "eng+chi_sim" for Chinese)
+  - Returns screenshot + extracted text
+  - Uses `--psm 3` (fully automatic page segmentation)
+- `computer_find_text` — find text on screen and return clickable coordinates
+  - Single-word substring matching (case-insensitive)
+  - Multi-word phrase matching (consecutive words on same line)
+  - Returns center coordinate in API space — ready for `left_click`
+  - Includes confidence scores and bounding boxes per match
+  - `all_matches` param to control whether all or just first match is returned
+  - Optional `region` param to limit search area
+  - Uses tesseract TSV output for word-level bounding boxes
+
+**Why this matters:**
+- Before: Agents had to visually parse screenshots to find UI elements — unreliable and token-heavy
+- After: `find_text("Submit")` returns exact coordinates, then `left_click` at those coordinates — precise and programmatic
+- Enables text verification: OCR a region to confirm expected content loaded
+- Enables search-and-click workflows: find a label → click it, without hardcoding coordinates
+
+**Docker Image:**
+- Added `tesseract-ocr`, `tesseract-ocr-eng`, `tesseract-ocr-chi-sim` to Dockerfile
+
+### Verification Results
+- **sc-57**: ✅ Both tools loaded with correct schemas after hot restart
+- **sc-58**: ✅ Full screen OCR returned 14 HN article titles with readable text
+- **sc-59**: ✅ Region OCR [80,250,700,400] returned articles 1-4, correctly cropped
+- **sc-60**: ✅ find_text "Firefox" found 3 matches at [564,37], [324,73], [126,160]
+- **sc-61**: ✅ find_text "Hacker News" (multi-word) found 4 matches across taskbar, title, tabs
+- **sc-62**: ✅ find_text "Cloud VM" at [150,553] → clicked → navigated to Cloud VM benchmarks article
+
+### Commits
+1. `645e9a3` — feat: OCR tools — computer_ocr + computer_find_text (v1.11.0)
+
+### Code Stats
+- MCP server: ~2030 lines (up from ~1808)
+- 24 MCP tools (added: computer_ocr, computer_find_text)
+- Server version: 1.11.0
+
+### Next Steps
+- [ ] `computer_scroll_to` — scroll until visual target appears (find_text + scroll loop)
+- [ ] `computer_type_file` — type large content via file (bypass xdotool limits)
+- [ ] Edge case testing: large files, special filenames, symlinks
+- [ ] Session replay with screenshot comparison (diff against recorded screenshots)
+- [ ] OCR on colored backgrounds (login on orange HN bar wasn't detected — investigate)
