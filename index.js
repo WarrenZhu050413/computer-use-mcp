@@ -4590,5 +4590,149 @@ server.tool(
   }
 );
 
+// === Window Inspection / Accessibility ===
+
+server.tool(
+  "computer_inspect",
+  "Inspect windows and UI elements on screen. Returns structured information about windows: class, PID, position, size, state. Use 'active' to inspect the focused window, 'all' to list all visible application windows, or 'at' with a coordinate to find what window is at that position. More reliable than OCR for understanding screen layout.",
+  {
+    mode: z.enum(["active", "all", "at"]).describe("'active': inspect focused window. 'all': list all visible app windows. 'at': find window at coordinate."),
+    coordinate: z.array(z.number()).optional().describe("[x, y] coordinate to inspect (required for mode='at')"),
+    container_name: z.string().optional().describe("Target container (default: primary)"),
+  },
+  async ({ mode, coordinate, container_name }) => {
+    const cn = container_name || DEFAULT_CONTAINER;
+    try {
+      const dn = getDisplayNumber(cn);
+      const env = environments.get(cn);
+      const dispW = env?.width || DISPLAY_WIDTH;
+      const dispH = env?.height || DISPLAY_HEIGHT;
+      const scaleFactor = getScaleFactor(dispW, dispH);
+
+      // Helper: get window properties
+      function getWindowInfo(winId) {
+        const info = { id: winId };
+        try {
+          info.name = dockerExec(`xdotool getwindowname ${winId} 2>/dev/null || echo ""`, 5000, cn).toString().trim();
+        } catch { info.name = ""; }
+        try {
+          const cls = dockerExec(`xprop -id ${winId} WM_CLASS 2>/dev/null`, 5000, cn).toString().trim();
+          const match = cls.match(/= "(.*?)", "(.*?)"/);
+          if (match) { info.instance = match[1]; info.class = match[2]; }
+        } catch {}
+        try {
+          const pid = dockerExec(`xprop -id ${winId} _NET_WM_PID 2>/dev/null`, 5000, cn).toString().trim();
+          const m = pid.match(/= (\d+)/);
+          if (m) info.pid = parseInt(m[1]);
+        } catch {}
+        try {
+          const geo = dockerExec(`xdotool getwindowgeometry --shell ${winId} 2>/dev/null`, 5000, cn).toString();
+          const x = geo.match(/X=(\d+)/); const y = geo.match(/Y=(\d+)/);
+          const w = geo.match(/WIDTH=(\d+)/); const h = geo.match(/HEIGHT=(\d+)/);
+          if (x && y && w && h) {
+            // Convert display coords to API coords
+            info.position = [Math.round(parseInt(x[1]) * scaleFactor), Math.round(parseInt(y[1]) * scaleFactor)];
+            info.size = [Math.round(parseInt(w[1]) * scaleFactor), Math.round(parseInt(h[1]) * scaleFactor)];
+          }
+        } catch {}
+        try {
+          const state = dockerExec(`xprop -id ${winId} _NET_WM_STATE 2>/dev/null`, 5000, cn).toString().trim();
+          const stateMatch = state.match(/= (.+)/);
+          if (stateMatch) info.state = stateMatch[1].replace(/_NET_WM_STATE_/g, "").toLowerCase().split(", ");
+        } catch {}
+        try {
+          const type = dockerExec(`xprop -id ${winId} _NET_WM_WINDOW_TYPE 2>/dev/null`, 5000, cn).toString().trim();
+          const typeMatch = type.match(/= (.+)/);
+          if (typeMatch) info.type = typeMatch[1].replace(/_NET_WM_WINDOW_TYPE_/g, "").toLowerCase();
+        } catch {}
+        return info;
+      }
+
+      // Skip patterns for internal windows
+      const skipClasses = /xfwm4|xfdesktop|xfce4-panel|wrapper-2\.0/i;
+
+      if (mode === "active") {
+        const activeId = dockerExec(`xdotool getactivewindow`, 5000, cn).toString().trim();
+        const info = getWindowInfo(activeId);
+        const ss = takeScreenshot(cn);
+        return {
+          content: [
+            { type: "image", data: ss.data, mimeType: ss.mimeType },
+            { type: "text", text: JSON.stringify(info, null, 2) }
+          ]
+        };
+      }
+
+      if (mode === "all") {
+        const winIds = dockerExec(`xdotool search --onlyvisible --name '.' 2>/dev/null`, 10000, cn)
+          .toString().trim().split("\n").filter(Boolean).slice(0, 50);
+
+        const windows = [];
+        for (const wid of winIds) {
+          const info = getWindowInfo(wid);
+          // Skip internal XFCE windows
+          if (info.class && skipClasses.test(info.class)) continue;
+          if (info.instance && skipClasses.test(info.instance)) continue;
+          if (!info.name || info.name === "") continue;
+          windows.push(info);
+        }
+
+        const ss = takeScreenshot(cn);
+        return {
+          content: [
+            { type: "image", data: ss.data, mimeType: ss.mimeType },
+            { type: "text", text: `${windows.length} application windows:\n${JSON.stringify(windows, null, 2)}` }
+          ]
+        };
+      }
+
+      if (mode === "at") {
+        if (!coordinate || coordinate.length !== 2) {
+          return { content: [{ type: "text", text: "Error: coordinate [x, y] required for mode='at'" }], isError: true };
+        }
+        // Convert API coords to display coords
+        const dispX = Math.round(coordinate[0] / scaleFactor);
+        const dispY = Math.round(coordinate[1] / scaleFactor);
+
+        // Find all windows, check which ones contain the point
+        const winIds = dockerExec(`xdotool search --onlyvisible --name '.' 2>/dev/null`, 10000, cn)
+          .toString().trim().split("\n").filter(Boolean).slice(0, 50);
+
+        const matches = [];
+        for (const wid of winIds) {
+          try {
+            const geo = dockerExec(`xdotool getwindowgeometry --shell ${wid} 2>/dev/null`, 5000, cn).toString();
+            const x = parseInt(geo.match(/X=(\d+)/)?.[1] || "0");
+            const y = parseInt(geo.match(/Y=(\d+)/)?.[1] || "0");
+            const w = parseInt(geo.match(/WIDTH=(\d+)/)?.[1] || "0");
+            const h = parseInt(geo.match(/HEIGHT=(\d+)/)?.[1] || "0");
+            if (dispX >= x && dispX <= x + w && dispY >= y && dispY <= y + h) {
+              const info = getWindowInfo(wid);
+              if (info.class && skipClasses.test(info.class)) continue;
+              if (info.instance && skipClasses.test(info.instance)) continue;
+              matches.push(info);
+            }
+          } catch {}
+        }
+
+        const ss = takeScreenshot(cn);
+        return {
+          content: [
+            { type: "image", data: ss.data, mimeType: ss.mimeType },
+            { type: "text", text: matches.length > 0
+              ? `Window(s) at [${coordinate}]:\n${JSON.stringify(matches, null, 2)}`
+              : `No application window found at [${coordinate}]`
+            }
+          ]
+        };
+      }
+
+      return { content: [{ type: "text", text: `Unknown mode: ${mode}` }], isError: true };
+    } catch (err) {
+      return { content: [{ type: "text", text: `Inspect error: ${err.message}` }], isError: true };
+    }
+  }
+);
+
 const transport = new StdioServerTransport();
 await server.connect(transport);
