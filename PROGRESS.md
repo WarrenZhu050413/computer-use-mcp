@@ -1982,6 +1982,52 @@ Click UI elements by accessibility role and name — no coordinates needed. Quer
 
 ### Next Steps
 - [ ] Monitor for API updates (next check in ~2 cycles)
-- [ ] Accessibility-driven form filling (type into fields by a11y name)
+- [x] Accessibility-driven form filling → done in cycle 42 (computer_a11y_type)
 - [ ] Browser tab management tool (list/close/switch tabs)
 - [ ] Performance: reduce screenshot latency on high-frequency operations
+
+---
+
+## Cycle 42 (2026-03-08)
+
+### New Features
+
+#### computer_a11y_type (Tool #44)
+Type text into UI elements found by accessibility role/name — no coordinates needed. Finds the element via AT-SPI2, clicks to focus it, optionally clears existing content (ctrl+a + Delete), then types. Supports unicode via clipboardPaste and short ASCII via xdotool type.
+
+- **Parameters**: `role`, `name` (element filter), `text` (to type), `clear_first` (default true), `app`, `window_title`, `index`
+- Ideal for form fields, search boxes, URL bars, text inputs
+
+#### computer_a11y_read (Tool #45)
+Read properties of UI elements without clicking — returns structured JSON about matching elements. Useful for verifying UI state programmatically (is this button enabled? is this checkbox checked?).
+
+- **Returns**: role, name, states, text content, value, available actions, bounding box (API coords), a11y tree path
+- **Parameters**: `role`, `name`, `app`, `window_title`, `max_results`, `include_text`
+
+#### queryA11yFlat() Helper
+Shared helper extracted from computer_a11y_click — queries AT-SPI2 flat tree and filters by role/name. Reused by all 3 a11y interaction tools (click, type, read), eliminating code duplication.
+
+### Bug Fix
+- `computer_a11y_read`: Used `--include-text` flag (doesn't exist) instead of `--no-text` (the actual flag). Default is text included; `--no-text` disables it.
+
+### Real-World Dogfooding
+- Used `a11y_type` to type URL into Firefox address bar by role="entry" name="Search" — worked perfectly
+- Pressed Enter to navigate to httpbin.org/get — JSON response loaded
+- Used `a11y_read` to enumerate 27 push buttons and 196 links in Firefox with full state/action data
+- Full semantic browsing workflow: navigate → read page → type into fields → verify state — all via a11y
+
+### Commits
+1. `fddc0de` — docs: update PROGRESS.md with cycle 41, bump version to 1.34.0
+2. `6678beb` — feat: add computer_a11y_type and computer_a11y_read tools, extract queryA11yFlat helper
+3. `653486c` — fix: computer_a11y_read uses --no-text flag (not --include-text)
+
+### Code Stats
+- MCP server: ~5300 lines (up from ~5050)
+- 45 MCP tools (up from 43)
+- Server version: 1.35.0
+
+### Next Steps
+- [ ] Monitor for API updates (next check in ~2 cycles)
+- [ ] Browser tab management tool (list/close/switch tabs)
+- [ ] Performance: reduce screenshot latency on high-frequency operations
+- [ ] A11y-driven form automation (fill multiple fields in one call)
