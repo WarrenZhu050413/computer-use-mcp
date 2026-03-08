@@ -19,6 +19,7 @@ const SCREENSHOT_FORMAT = (process.env.SCREENSHOT_FORMAT || "jpeg").toLowerCase(
 const SCREENSHOT_QUALITY = parseInt(process.env.SCREENSHOT_QUALITY || "80", 10);
 const TYPING_DELAY_MS = 12;
 const MAX_RESPONSE_LEN = 16000;
+const MAX_API_DIMENSION = 1568; // Anthropic spec: max longest edge in API space
 
 // === Multi-container environment tracking ===
 const environments = new Map();
@@ -30,7 +31,34 @@ environments.set(DEFAULT_CONTAINER, {
   vncPort: DEFAULT_VNC_PORT,
   novncPort: DEFAULT_NOVNC_PORT,
   workspace: DEFAULT_WORKSPACE,
+  width: DISPLAY_WIDTH,
+  height: DISPLAY_HEIGHT,
 });
+
+// === Coordinate scaling (Anthropic spec: max 1568px on longest edge) ===
+
+function getScaleFactor(width, height) {
+  const longest = Math.max(width, height);
+  if (longest <= MAX_API_DIMENSION) return 1;
+  return MAX_API_DIMENSION / longest;
+}
+
+function getApiDimensions(containerName = DEFAULT_CONTAINER) {
+  const env = environments.get(containerName);
+  const w = env?.width || DISPLAY_WIDTH;
+  const h = env?.height || DISPLAY_HEIGHT;
+  const s = getScaleFactor(w, h);
+  return { width: Math.round(w * s), height: Math.round(h * s) };
+}
+
+function apiToDisplay(apiX, apiY, containerName = DEFAULT_CONTAINER) {
+  const env = environments.get(containerName);
+  const w = env?.width || DISPLAY_WIDTH;
+  const h = env?.height || DISPLAY_HEIGHT;
+  const s = getScaleFactor(w, h);
+  if (s === 1) return [apiX, apiY];
+  return [Math.round(apiX / s), Math.round(apiY / s)];
+}
 
 function resolveContainer(name) {
   const cn = name || DEFAULT_CONTAINER;
@@ -55,8 +83,11 @@ function restartContainer(containerName = DEFAULT_CONTAINER) {
   try {
     // Full recreation: rm + run (docker start leaves stale X11 lock files)
     try { execFileSync("docker", ["rm", "-f", containerName], { timeout: 10000 }); } catch {}
+    const envW = env.width || DISPLAY_WIDTH;
+    const envH = env.height || DISPLAY_HEIGHT;
     execFileSync("docker", [
       "run", "-d", "--name", containerName,
+      "-e", `SCREEN_RESOLUTION=${envW}x${envH}`,
       "-p", `${env.vncPort}:5900`,
       "-p", `${env.novncPort}:6080`,
       "-v", `${env.workspace}:/workspace`,
@@ -100,31 +131,44 @@ function takeScreenshot(containerName = DEFAULT_CONTAINER) {
   const pngPath = `/tmp/_ss_${id}.png`;
   dockerExec(`scrot -o ${pngPath}`, 30000, containerName);
 
-  if (SCREENSHOT_FORMAT === "jpeg" || SCREENSHOT_FORMAT === "jpg") {
-    const jpgPath = `/tmp/_ss_${id}.jpg`;
-    dockerExec(`convert ${pngPath} -quality ${SCREENSHOT_QUALITY} ${jpgPath}`, 30000, containerName);
-    const b64 = dockerExec(`base64 ${jpgPath} && rm -f ${pngPath} ${jpgPath}`, 30000, containerName).toString().replace(/\s/g, "");
-    return { data: b64, mimeType: "image/jpeg" };
+  const api = getApiDimensions(containerName);
+  const env = environments.get(containerName);
+  const displayW = env?.width || DISPLAY_WIDTH;
+  const displayH = env?.height || DISPLAY_HEIGHT;
+  const needsScale = api.width !== displayW || api.height !== displayH;
+  const useJpeg = SCREENSHOT_FORMAT === "jpeg" || SCREENSHOT_FORMAT === "jpg";
+
+  if (needsScale || useJpeg) {
+    const outExt = useJpeg ? "jpg" : "png";
+    const outPath = `/tmp/_ss_${id}_out.${outExt}`;
+    const resizeFlag = needsScale ? `-resize ${api.width}x${api.height}!` : "";
+    const qualityFlag = useJpeg ? `-quality ${SCREENSHOT_QUALITY}` : "";
+    dockerExec(`convert ${pngPath} ${resizeFlag} ${qualityFlag} ${outPath}`, 30000, containerName);
+    const b64 = dockerExec(`base64 ${outPath} && rm -f ${pngPath} ${outPath}`, 30000, containerName).toString().replace(/\s/g, "");
+    return { data: b64, mimeType: useJpeg ? "image/jpeg" : "image/png", apiWidth: api.width, apiHeight: api.height };
   }
 
   const b64 = dockerExec(`base64 ${pngPath} && rm -f ${pngPath}`, 30000, containerName).toString().replace(/\s/g, "");
-  return { data: b64, mimeType: "image/png" };
+  return { data: b64, mimeType: "image/png", apiWidth: api.width, apiHeight: api.height };
 }
 
 function xdotool(args, containerName = DEFAULT_CONTAINER) {
   dockerExec(`xdotool ${args}`, 30000, containerName);
 }
 
-function validateCoord(coord, name = "coordinate") {
+function validateCoord(coord, name = "coordinate", containerName = DEFAULT_CONTAINER) {
   if (!coord || coord.length !== 2) throw new Error(`${name} must be [x, y]`);
   const [x, y] = coord;
   if (typeof x !== "number" || typeof y !== "number" || x < 0 || y < 0) {
     throw new Error(`${name} values must be non-negative numbers`);
   }
-  if (x >= DISPLAY_WIDTH || y >= DISPLAY_HEIGHT) {
-    throw new Error(`${name} [${x},${y}] out of bounds (display is ${DISPLAY_WIDTH}x${DISPLAY_HEIGHT}, max [${DISPLAY_WIDTH-1},${DISPLAY_HEIGHT-1}])`);
+  const api = getApiDimensions(containerName);
+  if (x >= api.width || y >= api.height) {
+    throw new Error(`${name} [${x},${y}] out of bounds (API space is ${api.width}x${api.height}, max [${api.width-1},${api.height-1}])`);
   }
-  return [Math.round(x), Math.round(y)];
+  // Scale from API coordinates to actual display coordinates
+  const [dx, dy] = apiToDisplay(x, y, containerName);
+  return [Math.round(dx), Math.round(dy)];
 }
 
 function mapKey(key) {
@@ -166,7 +210,7 @@ function executeAction({ action, coordinate, text, scroll_direction, scroll_amou
   switch (action) {
     case "left_click": {
       if (coordinate) {
-        const [x, y] = validateCoord(coordinate);
+        const [x, y] = validateCoord(coordinate, "coordinate", containerName);
         clickWithModifier(x, y, 1, text, containerName);
       } else {
         if (text) {
@@ -181,7 +225,7 @@ function executeAction({ action, coordinate, text, scroll_direction, scroll_amou
 
     case "right_click": {
       if (coordinate) {
-        const [x, y] = validateCoord(coordinate);
+        const [x, y] = validateCoord(coordinate, "coordinate", containerName);
         clickWithModifier(x, y, 3, text, containerName);
       } else {
         xdotool(`click 3`, containerName);
@@ -191,7 +235,7 @@ function executeAction({ action, coordinate, text, scroll_direction, scroll_amou
 
     case "middle_click": {
       if (coordinate) {
-        const [x, y] = validateCoord(coordinate);
+        const [x, y] = validateCoord(coordinate, "coordinate", containerName);
         clickWithModifier(x, y, 2, text, containerName);
       } else {
         xdotool(`click 2`, containerName);
@@ -201,7 +245,7 @@ function executeAction({ action, coordinate, text, scroll_direction, scroll_amou
 
     case "double_click": {
       if (coordinate) {
-        const [x, y] = validateCoord(coordinate);
+        const [x, y] = validateCoord(coordinate, "coordinate", containerName);
         xdotool(`mousemove ${x} ${y} click --repeat 2 --delay 10 1`, containerName);
       } else {
         xdotool(`click --repeat 2 --delay 10 1`, containerName);
@@ -211,7 +255,7 @@ function executeAction({ action, coordinate, text, scroll_direction, scroll_amou
 
     case "triple_click": {
       if (coordinate) {
-        const [x, y] = validateCoord(coordinate);
+        const [x, y] = validateCoord(coordinate, "coordinate", containerName);
         xdotool(`mousemove ${x} ${y} click --repeat 3 --delay 10 1`, containerName);
       } else {
         xdotool(`click --repeat 3 --delay 10 1`, containerName);
@@ -222,8 +266,8 @@ function executeAction({ action, coordinate, text, scroll_direction, scroll_amou
     case "left_click_drag": {
       if (!start_coordinate) throw new Error("start_coordinate required for left_click_drag");
       if (!coordinate) throw new Error("coordinate (end position) required for left_click_drag");
-      const [sx, sy] = validateCoord(start_coordinate, "start_coordinate");
-      const [ex, ey] = validateCoord(coordinate, "coordinate (end)");
+      const [sx, sy] = validateCoord(start_coordinate, "start_coordinate", containerName);
+      const [ex, ey] = validateCoord(coordinate, "coordinate (end)", containerName);
       xdotool(`mousemove ${sx} ${sy} mousedown 1 mousemove ${ex} ${ey} mouseup 1`, containerName);
       break;
     }
@@ -256,7 +300,7 @@ function executeAction({ action, coordinate, text, scroll_direction, scroll_amou
 
     case "mouse_move": {
       if (!coordinate) throw new Error("coordinate required for mouse_move");
-      const [x, y] = validateCoord(coordinate);
+      const [x, y] = validateCoord(coordinate, "coordinate", containerName);
       xdotool(`mousemove ${x} ${y}`, containerName);
       break;
     }
@@ -266,7 +310,7 @@ function executeAction({ action, coordinate, text, scroll_direction, scroll_amou
       const amount = scroll_amount || 3;
       if (amount < 0) throw new Error("scroll_amount must be non-negative");
       if (coordinate) {
-        const [x, y] = validateCoord(coordinate);
+        const [x, y] = validateCoord(coordinate, "coordinate", containerName);
         xdotool(`mousemove ${x} ${y}`, containerName);
       }
       const buttonMap = { up: 4, down: 5, left: 6, right: 7 };
@@ -282,7 +326,7 @@ function executeAction({ action, coordinate, text, scroll_direction, scroll_amou
 
     case "left_mouse_down": {
       if (coordinate) {
-        const [x, y] = validateCoord(coordinate);
+        const [x, y] = validateCoord(coordinate, "coordinate", containerName);
         xdotool(`mousemove ${x} ${y} mousedown 1`, containerName);
       } else {
         xdotool(`mousedown 1`, containerName);
@@ -292,7 +336,7 @@ function executeAction({ action, coordinate, text, scroll_direction, scroll_amou
 
     case "left_mouse_up": {
       if (coordinate) {
-        const [x, y] = validateCoord(coordinate);
+        const [x, y] = validateCoord(coordinate, "coordinate", containerName);
         xdotool(`mousemove ${x} ${y} mouseup 1`, containerName);
       } else {
         xdotool(`mouseup 1`, containerName);
@@ -309,7 +353,7 @@ function executeAction({ action, coordinate, text, scroll_direction, scroll_amou
 
 const server = new McpServer({
   name: "computer-use",
-  version: "1.1.0",
+  version: "1.2.0",
 });
 
 const actionSchema = {
@@ -339,11 +383,12 @@ const actionSchema = {
 
 server.tool(
   "computer",
-  `Anthropic Computer Use tool. Interact with a virtual desktop (${DISPLAY_WIDTH}x${DISPLAY_HEIGHT}).
+  `Anthropic Computer Use tool. Interact with a virtual desktop.
 Actions: screenshot, left_click, right_click, middle_click, double_click, triple_click,
 left_click_drag, type, key, mouse_move, scroll, left_mouse_down, left_mouse_up,
 hold_key, wait, zoom, cursor_position.
-Coordinates are [x, y] from top-left origin. Every action returns a follow-up screenshot.
+Coordinates are [x, y] from top-left origin in API space. Every action returns a follow-up screenshot.
+Displays > 1568px longest edge are auto-scaled (coordinates and screenshots mapped).
 hold_key: holds a key and executes a nested action (via hold_key_action param), or holds for duration seconds.
 Multi-container: use container_name to target a specific environment (see computer_env_create/list).`,
   actionSchema,
@@ -359,7 +404,7 @@ Multi-container: use container_name to target a specific environment (see comput
           return {
             content: [
               { type: "image", data: ss.data, mimeType: ss.mimeType },
-              { type: "text", text: `Screenshot captured (${DISPLAY_WIDTH}x${DISPLAY_HEIGHT}, ${ss.mimeType})${label}` }
+              { type: "text", text: `Screenshot captured (${ss.apiWidth}x${ss.apiHeight}, ${ss.mimeType})${label}` }
             ]
           };
         }
@@ -414,24 +459,29 @@ Multi-container: use container_name to target a specific environment (see comput
 
         case "zoom": {
           if (!region || region.length !== 4) throw new Error("region [x1, y1, x2, y2] required for zoom");
-          const [x1, y1, x2, y2] = region;
-          const w = x2 - x1;
-          const h = y2 - y1;
-          if (w <= 0 || h <= 0) throw new Error("zoom region must have positive width and height");
-          const id = randomUUID().slice(0, 8);
-          const ssPath = `/tmp/_ss_${id}.png`;
+          const [rx1, ry1, rx2, ry2] = region;
+          // Region coords are in API space — scale to display coords
+          const [dx1, dy1] = apiToDisplay(rx1, ry1, cn);
+          const [dx2, dy2] = apiToDisplay(rx2, ry2, cn);
+          const cropW = dx2 - dx1;
+          const cropH = dy2 - dy1;
+          if (cropW <= 0 || cropH <= 0) throw new Error("zoom region must have positive width and height");
+          const zApi = getApiDimensions(cn);
+          const zId = randomUUID().slice(0, 8);
+          const ssPath = `/tmp/_ss_${zId}.png`;
           const useJpeg = SCREENSHOT_FORMAT === "jpeg" || SCREENSHOT_FORMAT === "jpg";
           const outExt = useJpeg ? "jpg" : "png";
-          const zoomPath = `/tmp/_zoom_${id}.${outExt}`;
+          const zoomPath = `/tmp/_zoom_${zId}.${outExt}`;
           dockerExec(`scrot -o ${ssPath}`, 30000, cn);
           const qualityFlag = useJpeg ? `-quality ${SCREENSHOT_QUALITY}` : "";
-          dockerExec(`convert ${ssPath} -crop ${w}x${h}+${x1}+${y1} +repage -resize ${DISPLAY_WIDTH}x${DISPLAY_HEIGHT} ${qualityFlag} ${zoomPath}`, 30000, cn);
+          // Crop at display coords, resize to API dimensions
+          dockerExec(`convert ${ssPath} -crop ${cropW}x${cropH}+${dx1}+${dy1} +repage -resize ${zApi.width}x${zApi.height} ${qualityFlag} ${zoomPath}`, 30000, cn);
           const b64 = dockerExec(`base64 ${zoomPath} && rm -f ${ssPath} ${zoomPath}`, 30000, cn).toString().replace(/\s/g, "");
           const zoomMime = useJpeg ? "image/jpeg" : "image/png";
           return {
             content: [
               { type: "image", data: b64, mimeType: zoomMime },
-              { type: "text", text: `Zoomed into region [${x1},${y1},${x2},${y2}]${label}` }
+              { type: "text", text: `Zoomed into region [${rx1},${ry1},${rx2},${ry2}]${label}` }
             ]
           };
         }
@@ -440,10 +490,17 @@ Multi-container: use container_name to target a specific environment (see comput
           const pos = dockerExec("xdotool getmouselocation --shell", 30000, cn).toString();
           const xMatch = pos.match(/X=(\d+)/);
           const yMatch = pos.match(/Y=(\d+)/);
-          const x = xMatch ? parseInt(xMatch[1]) : 0;
-          const y = yMatch ? parseInt(yMatch[1]) : 0;
+          const rawX = xMatch ? parseInt(xMatch[1]) : 0;
+          const rawY = yMatch ? parseInt(yMatch[1]) : 0;
+          // Convert display coordinates to API space
+          const cEnv = environments.get(cn);
+          const cW = cEnv?.width || DISPLAY_WIDTH;
+          const cH = cEnv?.height || DISPLAY_HEIGHT;
+          const cS = getScaleFactor(cW, cH);
+          const apiX = cS === 1 ? rawX : Math.round(rawX * cS);
+          const apiY = cS === 1 ? rawY : Math.round(rawY * cS);
           return {
-            content: [{ type: "text", text: `X=${x},Y=${y}` }]
+            content: [{ type: "text", text: `X=${apiX},Y=${apiY}` }]
           };
         }
 
@@ -528,9 +585,13 @@ server.tool(
         display = "active";
       } catch { display = "inactive"; }
       const env = environments.get(cn);
+      const sApi = getApiDimensions(cn);
+      const resDisplay = env ? `${env.width}x${env.height}` : `${DISPLAY_WIDTH}x${DISPLAY_HEIGHT}`;
+      const resApi = `${sApi.width}x${sApi.height}`;
+      const resLine = resDisplay === resApi ? `Resolution: ${resDisplay}` : `Resolution: ${resDisplay} (API: ${resApi}, scaled)`;
       return {
         content: [{ type: "text", text:
-          `Container: ${status}\nName: ${cn}\nStarted: ${uptime}\nDisplay: ${display}\nResolution: ${DISPLAY_WIDTH}x${DISPLAY_HEIGHT}` +
+          `Container: ${status}\nName: ${cn}\nStarted: ${uptime}\nDisplay: ${display}\n${resLine}` +
           (env ? `\nVNC: ${env.vncPort}\nnoVNC: ${env.novncPort}\nWorkspace: ${env.workspace}` : "")
         }]
       };
@@ -551,8 +612,10 @@ server.tool(
   {
     name: z.string().optional().describe("Environment name (auto-generated if omitted)"),
     image: z.string().optional().describe(`Docker image to use (default: ${DEFAULT_IMAGE})`),
+    width: z.number().optional().describe("Display width in pixels (default: 1024)"),
+    height: z.number().optional().describe("Display height in pixels (default: 768)"),
   },
-  async ({ name, image }) => {
+  async ({ name, image, width, height }) => {
     const envName = name || `env-${randomUUID().slice(0, 6)}`;
     if (environments.has(envName)) {
       return {
@@ -562,6 +625,8 @@ server.tool(
     }
 
     const envImage = image || DEFAULT_IMAGE;
+    const envWidth = width || DISPLAY_WIDTH;
+    const envHeight = height || DISPLAY_HEIGHT;
     const vncPort = DEFAULT_VNC_PORT + nextEnvPort;
     const novncPort = DEFAULT_NOVNC_PORT + nextEnvPort;
     const workspace = `${DEFAULT_WORKSPACE}-${envName}`;
@@ -571,11 +636,12 @@ server.tool(
     try { mkdirSync(workspace, { recursive: true }); } catch {}
 
     // Register before starting so restartContainer can find the config
-    environments.set(envName, { image: envImage, vncPort, novncPort, workspace });
+    environments.set(envName, { image: envImage, vncPort, novncPort, workspace, width: envWidth, height: envHeight });
 
     try {
       execFileSync("docker", [
         "run", "-d", "--name", envName,
+        "-e", `SCREEN_RESOLUTION=${envWidth}x${envHeight}`,
         "-p", `${vncPort}:5900`,
         "-p", `${novncPort}:6080`,
         "-v", `${workspace}:/workspace`,
@@ -595,10 +661,13 @@ server.tool(
         execFileSync("sleep", ["1"]);
       }
 
+      const cApi = getApiDimensions(envName);
+      const resInfo = cApi.width !== envWidth ? `${envWidth}x${envHeight} (API: ${cApi.width}x${cApi.height})` : `${envWidth}x${envHeight}`;
       return {
         content: [{ type: "text", text:
           `Environment created: ${envName}\n` +
           `Image: ${envImage}\n` +
+          `Resolution: ${resInfo}\n` +
           `VNC port: ${vncPort}\n` +
           `noVNC port: ${novncPort}\n` +
           `noVNC URL: http://localhost:${novncPort}/vnc.html\n` +
@@ -653,6 +722,66 @@ server.tool(
 );
 
 server.tool(
+  "computer_env_resize",
+  "Change the display resolution of a virtual desktop environment. Restarts Xvfb and VNC — open windows may be rearranged.",
+  {
+    name: z.string().optional().describe("Environment name (default: primary)"),
+    width: z.number().describe("New display width in pixels"),
+    height: z.number().describe("New display height in pixels"),
+  },
+  async ({ name, width, height }) => {
+    const cn = resolveContainer(name);
+    if (width < 320 || height < 240) {
+      return { content: [{ type: "text", text: "Minimum resolution is 320x240" }], isError: true };
+    }
+    if (width > 3840 || height > 2160) {
+      return { content: [{ type: "text", text: "Maximum resolution is 3840x2160" }], isError: true };
+    }
+
+    try {
+      // Kill Xvfb and x11vnc, restart with new resolution
+      dockerExec(`bash -c 'kill $(pgrep -f "Xvfb :1") 2>/dev/null || true'`, 10000, cn);
+      dockerExec(`bash -c 'kill $(pgrep -f "x11vnc") 2>/dev/null || true'`, 10000, cn);
+      await new Promise(r => setTimeout(r, 1000));
+
+      // Start new Xvfb with requested resolution
+      dockerExec(`bash -c 'Xvfb :1 -screen 0 ${width}x${height}x24 +extension GLX +render -noreset &'`, 10000, cn);
+      await new Promise(r => setTimeout(r, 2000));
+
+      // Restart x11vnc
+      dockerExec(`bash -c 'x11vnc -display :1 -forever -passwd secret -noxdamage -shared -rfbport 5900 -noscr &'`, 10000, cn);
+      await new Promise(r => setTimeout(r, 1000));
+
+      // Verify new resolution
+      const geom = dockerExec("xdotool getdisplaygeometry", 10000, cn).toString().trim();
+
+      // Update tracked resolution
+      const env = environments.get(cn);
+      if (env) {
+        env.width = width;
+        env.height = height;
+      }
+
+      const rApi = getApiDimensions(cn);
+      const resInfo = rApi.width !== width ? `${width}x${height} (API: ${rApi.width}x${rApi.height})` : `${width}x${height}`;
+
+      const ss = takeScreenshot(cn);
+      return {
+        content: [
+          { type: "image", data: ss.data, mimeType: ss.mimeType },
+          { type: "text", text: `Resolution changed to ${resInfo}\nActual display: ${geom}` }
+        ]
+      };
+    } catch (err) {
+      return {
+        content: [{ type: "text", text: `Failed to resize: ${err.message}` }],
+        isError: true
+      };
+    }
+  }
+);
+
+server.tool(
   "computer_env_list",
   "List all managed virtual desktop environments and their status.",
   {},
@@ -666,9 +795,13 @@ server.tool(
         ], { timeout: 5000 }).toString().trim();
       } catch { status = "not found"; }
 
+      const lApi = getApiDimensions(name);
+      const lRes = env.width ? `${env.width}x${env.height}` : `${DISPLAY_WIDTH}x${DISPLAY_HEIGHT}`;
+      const lApiRes = `${lApi.width}x${lApi.height}`;
+      const lResInfo = lRes !== lApiRes ? `${lRes} (API:${lApiRes})` : lRes;
       results.push(
         `${name}${name === DEFAULT_CONTAINER ? " (default)" : ""}: ${status}` +
-        `  VNC:${env.vncPort}  noVNC:${env.novncPort}  workspace:${env.workspace}`
+        `  ${lResInfo}  VNC:${env.vncPort}  noVNC:${env.novncPort}  workspace:${env.workspace}`
       );
     }
     return {
