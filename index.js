@@ -363,7 +363,7 @@ function executeAction({ action, coordinate, text, scroll_direction, scroll_amou
 
 const server = new McpServer({
   name: "computer-use",
-  version: "1.5.0",
+  version: "1.6.0",
 });
 
 const actionSchema = {
@@ -1035,8 +1035,13 @@ server.tool(
       }
       return { content: [{ type: "text", text: result || "(no processes)" }] };
     } catch (err) {
+      // grep returns exit code 1 when no matches found — not a real error
+      const stderr = err.stderr?.toString() || "";
+      if (filter && !stderr && (err.status === 1 || err.status === 123)) {
+        return { content: [{ type: "text", text: `(no processes matching '${filter}')` }] };
+      }
       return {
-        content: [{ type: "text", text: `Process list error: ${err.stderr?.toString() || err.message}` }],
+        content: [{ type: "text", text: `Process list error: ${stderr || err.message}` }],
         isError: true
       };
     }
@@ -1135,6 +1140,104 @@ server.tool(
     return {
       content: [{ type: "text", text: results.length > 0 ? results.join("\n") : "No environments registered" }]
     };
+  }
+);
+
+// === Browser & Application Helpers ===
+
+server.tool(
+  "computer_navigate",
+  "Open a URL in Firefox inside the container. If Firefox is not running, launches it. If it is running, opens the URL in a new tab. Returns a screenshot after page load.",
+  {
+    url: z.string().describe("URL to navigate to (e.g. 'https://example.com')"),
+    wait_seconds: z.number().optional().describe("Seconds to wait for page load before screenshot (default: 3)"),
+    new_window: z.boolean().optional().describe("Open in a new window instead of a new tab (default: false)"),
+    container_name: z.string().optional().describe("Target container (default: primary)"),
+  },
+  async ({ url, wait_seconds, new_window, container_name }) => {
+    try {
+      const cn = resolveContainer(container_name);
+      const waitSec = Math.min(Math.max(wait_seconds || 3, 1), 30);
+
+      // Validate URL - must have a scheme
+      let targetUrl = url;
+      if (!targetUrl.match(/^[a-zA-Z]+:\/\//)) {
+        targetUrl = "https://" + targetUrl;
+      }
+
+      // Use firefox CLI — it handles both launching and adding tabs
+      const firefoxArgs = new_window ? ["--new-window", targetUrl] : [targetUrl];
+      try {
+        dockerExec(
+          `DISPLAY=:${getDisplayNumber(cn)} firefox ${firefoxArgs.map(a => `'${a.replace(/'/g, "'\\''")}'`).join(" ")} &`,
+          5000, cn
+        );
+      } catch {
+        // firefox CLI sometimes exits non-zero even when it works (async launch)
+      }
+
+      // Wait for page load
+      await new Promise(r => setTimeout(r, waitSec * 1000));
+
+      // Take screenshot
+      const { base64, width, height, format } = takeScreenshot(cn);
+      return {
+        content: [
+          { type: "image", data: base64, mimeType: `image/${format}` },
+          { type: "text", text: `Navigated to ${targetUrl} (${width}x${height}, waited ${waitSec}s)` }
+        ]
+      };
+    } catch (err) {
+      return {
+        content: [{ type: "text", text: `Navigate error: ${err.message}` }],
+        isError: true
+      };
+    }
+  }
+);
+
+server.tool(
+  "computer_open",
+  "Open a file or launch an application inside the container. Uses xdg-open for files or direct command for apps.",
+  {
+    target: z.string().describe("File path to open, application name (e.g. 'xfce4-terminal', 'mousepad', 'thunar'), or command to run"),
+    args: z.array(z.string()).optional().describe("Additional arguments"),
+    wait_seconds: z.number().optional().describe("Seconds to wait before screenshot (default: 2)"),
+    container_name: z.string().optional().describe("Target container (default: primary)"),
+  },
+  async ({ target, args, wait_seconds, container_name }) => {
+    try {
+      const cn = resolveContainer(container_name);
+      const waitSec = Math.min(Math.max(wait_seconds || 2, 1), 30);
+      const extraArgs = args ? " " + args.map(a => `'${a.replace(/'/g, "'\\''")}'`).join(" ") : "";
+
+      // Determine if it's a file path or an application
+      const isPath = target.startsWith("/") || target.startsWith("~") || target.startsWith("./");
+      const cmd = isPath
+        ? `DISPLAY=:${getDisplayNumber(cn)} xdg-open '${target.replace(/'/g, "'\\''")}' &`
+        : `DISPLAY=:${getDisplayNumber(cn)} ${target}${extraArgs} &`;
+
+      try {
+        dockerExec(cmd, 5000, cn);
+      } catch {
+        // Async launch may exit non-zero
+      }
+
+      await new Promise(r => setTimeout(r, waitSec * 1000));
+
+      const { base64, width, height, format } = takeScreenshot(cn);
+      return {
+        content: [
+          { type: "image", data: base64, mimeType: `image/${format}` },
+          { type: "text", text: `Opened ${target}${extraArgs} (${width}x${height})` }
+        ]
+      };
+    } catch (err) {
+      return {
+        content: [{ type: "text", text: `Open error: ${err.message}` }],
+        isError: true
+      };
+    }
   }
 );
 
