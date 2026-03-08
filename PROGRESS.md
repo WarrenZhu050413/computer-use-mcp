@@ -1390,8 +1390,58 @@ Reusable named action sequences (macros) with 4 modes:
 - Server version: 1.20.0
 
 ### Next Steps
-- [ ] `computer_annotate` tool (draw rectangles/arrows on screenshots)
+- [x] `computer_annotate` tool (draw rectangles/arrows on screenshots) → cycle 28
 - [ ] `computer_window_tile` gap testing + cascade layout verification
 - [ ] Terminal detection improvements (more shell/emulator patterns)
 - [ ] Clipboard paste verification (ensure content actually arrived)
 - [ ] Macro: add "edit" mode to modify existing macros
+
+## Cycle 28 (2026-03-08)
+
+### New Tool: `computer_annotate`
+
+Draw visual annotations on screenshots for visual communication. 6 annotation types:
+
+| Type | Params | Description |
+|------|--------|-------------|
+| `rectangle` | coordinate + end_coordinate | Outline or filled rectangle |
+| `arrow` | coordinate (start) + end_coordinate (tip) | Line with triangular arrowhead |
+| `circle` | coordinate (center), optional radius | Outline or filled circle |
+| `text` | coordinate + text | Text label with dark background for readability |
+| `line` | coordinate + end_coordinate | Simple straight line |
+| `number` | coordinate, optional number | Colored circle with white number (callout marker) |
+
+Common options on all types: `color` (name or #hex, default red), `thickness` (1-20, default 3), `fill` (boolean), `font_size` (8-72), `radius` (5-500).
+
+Implementation details:
+- Uses ImageMagick `convert` with multiple inline `-draw` commands
+- `sanitizeDrawText()` handles shell escaping for text annotations
+- `colorToRgb()` maps color names to RGB for semi-transparent fills
+- `apiLengthToDisplay()` converts distances from API to display space
+- Arrowheads computed via vector math (unit vector + perpendicular for triangle)
+- Text labels get dark semi-transparent background rectangles for readability
+- Number markers: filled colored circle + white number text
+- Optional `save_path` to persist annotated image in container
+- Max 50 annotations per call
+
+### Verification Results
+- **sc-108**: Rectangle (outline+filled), circle (outline+filled), text (with dark background) — all colors/thickness correct
+- **sc-109**: 3 arrows at different angles with correctly oriented arrowheads, 2 lines — all render correctly
+- **sc-110**: 7 number markers (1-5 single digit, 10+99 multi-digit) with colored circles, white borders, centered text
+- **sc-111**: 5 error cases (bad JSON, invalid type, missing end_coordinate, missing text, empty array) — all return descriptive messages
+- **sc-112**: 12 mixed annotations on Anthropic docs page — real-world UI documentation use case
+
+### Commits
+1. `0856c3d` — feat: add computer_annotate tool for visual annotations on screenshots
+
+### Code Stats
+- MCP server: ~3440 lines (up from ~3230)
+- 33 MCP tools (up from 32)
+- Server version: 1.21.0
+
+### Next Steps
+- [ ] `computer_window_tile` gap testing + cascade layout verification
+- [ ] Terminal detection improvements (more shell/emulator patterns)
+- [ ] Clipboard paste verification (ensure content actually arrived)
+- [ ] Macro: add "edit" mode to modify existing macros
+- [ ] `computer_annotate` save_path verification + hex color testing
