@@ -2185,6 +2185,45 @@ Smarter a11y element matching that prefers: exact name > starts-with > shorter n
 - Server version: 1.39.0
 
 ### Next Steps
+- [x] A11y-driven scroll — done in cycle 47 (ensure_visible)
 - [ ] Performance: reduce screenshot latency on high-frequency operations
-- [ ] A11y-driven scroll (scroll within specific elements, not just the viewport)
+- [ ] Monitor for Anthropic API updates
+
+## Cycle 47 (2026-03-08)
+
+### New Features
+
+#### ensure_visible auto-scroll for a11y tools (d786682)
+Added `scrollToA11yElement()` shared helper that detects off-screen elements (missing AT-SPI2 "showing" state) and automatically scrolls the viewport to bring them into view before interaction. Up to 10 scroll attempts with re-query for fresh coordinates after each scroll.
+
+Added `ensure_visible` param (default: `true`) to:
+- `computer_a11y_click` — scrolls before clicking
+- `computer_a11y_type` — scrolls before typing
+- `computer_a11y_select` — per-element scroll in batch operations
+- `computer_a11y_fill` — per-field scroll in batch operations
+
+- **Before**: Off-screen elements (below the fold) were clicked at wrong coordinates or missed entirely
+- **After**: Elements are auto-scrolled into view, then interacted with using fresh coordinates
+- **How it works**: Checks "showing" state → if missing, calculates scroll direction/amount from bbox → scrolls via xdotool → re-queries a11y tree → repeats until visible or max attempts
+
+### Testing
+
+#### ensure_visible verified on httpbin form
+1. `a11y_click` on off-screen "Submit order" button → scrolled down, clicked, form submitted ✓
+2. `a11y_fill` with mix of visible ("Customer name") and off-screen ("Delivery instructions") fields → filled both ✓
+3. `ensure_visible=false` on visible "Medium" radio → clicked without scrolling, no regression ✓
+4. Full form flow: fill 4 text fields + select Large radio + check Bacon/Mushroom + submit → all data in JSON response ✓
+
+### Commits
+1. `d786682` — feat: add ensure_visible auto-scroll to a11y tools
+
+### Code Stats
+- MCP server: ~5950 lines (+100)
+- 48 MCP tools (unchanged — enhanced existing tools)
+- Server version: 1.40.0
+
+### Next Steps
+- [ ] Performance: reduce screenshot latency on high-frequency operations
+- [ ] A11y form validation reading (read error messages after submit)
+- [ ] Smart form fill: combine a11y_fill + a11y_select in one call
 - [ ] Monitor for Anthropic API updates
