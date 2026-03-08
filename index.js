@@ -78,10 +78,169 @@ function clickWithModifier(x, y, button, modifier) {
   }
 }
 
+// Core action executor — used by main handler and recursively by hold_key
+function executeAction({ action, coordinate, text, scroll_direction, scroll_amount,
+                         start_coordinate, duration, region }) {
+  switch (action) {
+    case "left_click": {
+      if (coordinate) {
+        const [x, y] = validateCoord(coordinate);
+        clickWithModifier(x, y, 1, text);
+      } else {
+        if (text) {
+          const mod = mapKey(text);
+          xdotool(`keydown ${mod} click 1 keyup ${mod}`);
+        } else {
+          xdotool(`click 1`);
+        }
+      }
+      break;
+    }
+
+    case "right_click": {
+      if (coordinate) {
+        const [x, y] = validateCoord(coordinate);
+        clickWithModifier(x, y, 3, text);
+      } else {
+        xdotool(`click 3`);
+      }
+      break;
+    }
+
+    case "middle_click": {
+      if (coordinate) {
+        const [x, y] = validateCoord(coordinate);
+        clickWithModifier(x, y, 2, text);
+      } else {
+        xdotool(`click 2`);
+      }
+      break;
+    }
+
+    case "double_click": {
+      if (coordinate) {
+        const [x, y] = validateCoord(coordinate);
+        xdotool(`mousemove ${x} ${y} click --repeat 2 --delay 10 1`);
+      } else {
+        xdotool(`click --repeat 2 --delay 10 1`);
+      }
+      break;
+    }
+
+    case "triple_click": {
+      if (coordinate) {
+        const [x, y] = validateCoord(coordinate);
+        xdotool(`mousemove ${x} ${y} click --repeat 3 --delay 10 1`);
+      } else {
+        xdotool(`click --repeat 3 --delay 10 1`);
+      }
+      break;
+    }
+
+    case "left_click_drag": {
+      if (!start_coordinate) throw new Error("start_coordinate required for left_click_drag");
+      if (!coordinate) throw new Error("coordinate (end position) required for left_click_drag");
+      const [sx, sy] = validateCoord(start_coordinate, "start_coordinate");
+      const [ex, ey] = validateCoord(coordinate, "coordinate (end)");
+      xdotool(`mousemove ${sx} ${sy} mousedown 1 mousemove ${ex} ${ey} mouseup 1`);
+      break;
+    }
+
+    case "type": {
+      if (!text) throw new Error("text required for type action");
+      const b64Text = Buffer.from(text).toString("base64");
+      const id = randomUUID().slice(0, 8);
+      const path = `/tmp/_type_${id}.txt`;
+      dockerExec(`echo ${b64Text} | base64 -d > ${path}`);
+      dockerExec(`xdotool type --clearmodifiers --delay ${TYPING_DELAY_MS} --file ${path} && rm -f ${path}`);
+      break;
+    }
+
+    case "key": {
+      if (!text) throw new Error("text required for key action");
+      const mapped = mapKey(text);
+      xdotool(`key --clearmodifiers -- ${mapped}`);
+      break;
+    }
+
+    case "mouse_move": {
+      if (!coordinate) throw new Error("coordinate required for mouse_move");
+      const [x, y] = validateCoord(coordinate);
+      xdotool(`mousemove ${x} ${y}`);
+      break;
+    }
+
+    case "scroll": {
+      const dir = scroll_direction || "down";
+      const amount = scroll_amount || 3;
+      if (coordinate) {
+        const [x, y] = validateCoord(coordinate);
+        xdotool(`mousemove ${x} ${y}`);
+      }
+      const buttonMap = { up: 4, down: 5, left: 6, right: 7 };
+      const btn = buttonMap[dir] || 5;
+      if (text) {
+        const mod = mapKey(text);
+        xdotool(`keydown ${mod} click --repeat ${amount} --delay 50 ${btn} keyup ${mod}`);
+      } else {
+        xdotool(`click --repeat ${amount} --delay 50 ${btn}`);
+      }
+      break;
+    }
+
+    case "left_mouse_down": {
+      if (coordinate) {
+        const [x, y] = validateCoord(coordinate);
+        xdotool(`mousemove ${x} ${y} mousedown 1`);
+      } else {
+        xdotool(`mousedown 1`);
+      }
+      break;
+    }
+
+    case "left_mouse_up": {
+      if (coordinate) {
+        const [x, y] = validateCoord(coordinate);
+        xdotool(`mousemove ${x} ${y} mouseup 1`);
+      } else {
+        xdotool(`mouseup 1`);
+      }
+      break;
+    }
+
+    default:
+      throw new Error(`Unknown action for executeAction: ${action}`);
+  }
+}
+
 const server = new McpServer({
   name: "computer-use",
   version: "1.0.0",
 });
+
+const actionSchema = {
+  action: z.enum([
+    "screenshot", "left_click", "right_click", "middle_click",
+    "double_click", "triple_click", "left_click_drag", "type",
+    "key", "mouse_move", "scroll", "left_mouse_down", "left_mouse_up",
+    "hold_key", "wait", "zoom", "cursor_position"
+  ]).describe("The action to perform"),
+  coordinate: z.array(z.number()).optional().describe("[x, y] position. Required for most actions, optional for clicks (uses current position)"),
+  text: z.string().optional().describe("Text to type, key combo (e.g. 'ctrl+s'), modifier key for click/scroll ('shift','ctrl','alt','super'), or key to hold"),
+  scroll_direction: z.enum(["up", "down", "left", "right"]).optional().describe("Scroll direction"),
+  scroll_amount: z.number().optional().describe("Number of scroll clicks (default 3)"),
+  start_coordinate: z.array(z.number()).optional().describe("[x, y] start position for left_click_drag"),
+  duration: z.number().optional().describe("Seconds to wait (for wait/hold_key actions)"),
+  region: z.array(z.number()).optional().describe("[x1, y1, x2, y2] region to zoom into"),
+  hold_key_action: z.object({
+    action: z.string().describe("Nested action to perform while key is held"),
+    coordinate: z.array(z.number()).optional(),
+    text: z.string().optional(),
+    scroll_direction: z.enum(["up", "down", "left", "right"]).optional(),
+    scroll_amount: z.number().optional(),
+    start_coordinate: z.array(z.number()).optional(),
+  }).optional().describe("Nested action to execute while holding the key (for hold_key action)"),
+};
 
 server.tool(
   "computer",
@@ -89,24 +248,11 @@ server.tool(
 Actions: screenshot, left_click, right_click, middle_click, double_click, triple_click,
 left_click_drag, type, key, mouse_move, scroll, left_mouse_down, left_mouse_up,
 hold_key, wait, zoom, cursor_position.
-Coordinates are [x, y] from top-left origin. Every action returns a follow-up screenshot.`,
-  {
-    action: z.enum([
-      "screenshot", "left_click", "right_click", "middle_click",
-      "double_click", "triple_click", "left_click_drag", "type",
-      "key", "mouse_move", "scroll", "left_mouse_down", "left_mouse_up",
-      "hold_key", "wait", "zoom", "cursor_position"
-    ]).describe("The action to perform"),
-    coordinate: z.array(z.number()).optional().describe("[x, y] position. Required for most actions, optional for clicks (uses current position)"),
-    text: z.string().optional().describe("Text to type, key combo (e.g. 'ctrl+s'), modifier key for click/scroll ('shift','ctrl','alt','super'), or key to hold"),
-    scroll_direction: z.enum(["up", "down", "left", "right"]).optional().describe("Scroll direction"),
-    scroll_amount: z.number().optional().describe("Number of scroll clicks (default 3)"),
-    start_coordinate: z.array(z.number()).optional().describe("[x, y] start position for left_click_drag"),
-    duration: z.number().optional().describe("Seconds to wait (for wait/hold_key actions)"),
-    region: z.array(z.number()).optional().describe("[x1, y1, x2, y2] region to zoom into"),
-  },
+Coordinates are [x, y] from top-left origin. Every action returns a follow-up screenshot.
+hold_key: holds a key and executes a nested action (via hold_key_action param), or holds for duration seconds.`,
+  actionSchema,
   async ({ action, coordinate, text, scroll_direction, scroll_amount,
-           start_coordinate, duration, region }) => {
+           start_coordinate, duration, region, hold_key_action }) => {
     try {
       switch (action) {
         case "screenshot": {
@@ -119,141 +265,39 @@ Coordinates are [x, y] from top-left origin. Every action returns a follow-up sc
           };
         }
 
-        case "left_click": {
-          if (coordinate) {
-            const [x, y] = validateCoord(coordinate);
-            clickWithModifier(x, y, 1, text);
-          } else {
-            if (text) {
-              const mod = mapKey(text);
-              xdotool(`keydown ${mod} click 1 keyup ${mod}`);
-            } else {
-              xdotool(`click 1`);
-            }
-          }
-          break;
-        }
-
-        case "right_click": {
-          if (coordinate) {
-            const [x, y] = validateCoord(coordinate);
-            clickWithModifier(x, y, 3, text);
-          } else {
-            xdotool(`click 3`);
-          }
-          break;
-        }
-
-        case "middle_click": {
-          if (coordinate) {
-            const [x, y] = validateCoord(coordinate);
-            clickWithModifier(x, y, 2, text);
-          } else {
-            xdotool(`click 2`);
-          }
-          break;
-        }
-
-        case "double_click": {
-          if (coordinate) {
-            const [x, y] = validateCoord(coordinate);
-            xdotool(`mousemove ${x} ${y} click --repeat 2 --delay 10 1`);
-          } else {
-            xdotool(`click --repeat 2 --delay 10 1`);
-          }
-          break;
-        }
-
-        case "triple_click": {
-          if (coordinate) {
-            const [x, y] = validateCoord(coordinate);
-            xdotool(`mousemove ${x} ${y} click --repeat 3 --delay 10 1`);
-          } else {
-            xdotool(`click --repeat 3 --delay 10 1`);
-          }
-          break;
-        }
-
-        case "left_click_drag": {
-          if (!start_coordinate) throw new Error("start_coordinate required for left_click_drag");
-          if (!coordinate) throw new Error("coordinate (end position) required for left_click_drag");
-          const [sx, sy] = validateCoord(start_coordinate, "start_coordinate");
-          const [ex, ey] = validateCoord(coordinate, "coordinate (end)");
-          xdotool(`mousemove ${sx} ${sy} mousedown 1 mousemove ${ex} ${ey} mouseup 1`);
-          break;
-        }
-
-        case "type": {
-          if (!text) throw new Error("text required for type action");
-          // Write text to temp file via base64 to avoid shell escaping issues
-          const b64Text = Buffer.from(text).toString("base64");
-          const id = randomUUID().slice(0, 8);
-          const path = `/tmp/_type_${id}.txt`;
-          dockerExec(`echo ${b64Text} | base64 -d > ${path}`);
-          // Type using file input — handles all special characters safely
-          dockerExec(`xdotool type --clearmodifiers --delay ${TYPING_DELAY_MS} --file ${path} && rm -f ${path}`);
-          break;
-        }
-
-        case "key": {
-          if (!text) throw new Error("text required for key action");
-          const mapped = mapKey(text);
-          xdotool(`key --clearmodifiers -- ${mapped}`);
-          break;
-        }
-
-        case "mouse_move": {
-          if (!coordinate) throw new Error("coordinate required for mouse_move");
-          const [x, y] = validateCoord(coordinate);
-          xdotool(`mousemove ${x} ${y}`);
-          break;
-        }
-
-        case "scroll": {
-          const dir = scroll_direction || "down";
-          const amount = scroll_amount || 3;
-          if (coordinate) {
-            const [x, y] = validateCoord(coordinate);
-            xdotool(`mousemove ${x} ${y}`);
-          }
-          const buttonMap = { up: 4, down: 5, left: 6, right: 7 };
-          const btn = buttonMap[dir] || 5;
-          if (text) {
-            const mod = mapKey(text);
-            xdotool(`keydown ${mod} click --repeat ${amount} --delay 50 ${btn} keyup ${mod}`);
-          } else {
-            xdotool(`click --repeat ${amount} --delay 50 ${btn}`);
-          }
-          break;
-        }
-
-        case "left_mouse_down": {
-          if (coordinate) {
-            const [x, y] = validateCoord(coordinate);
-            xdotool(`mousemove ${x} ${y} mousedown 1`);
-          } else {
-            xdotool(`mousedown 1`);
-          }
-          break;
-        }
-
+        case "left_click":
+        case "right_click":
+        case "middle_click":
+        case "double_click":
+        case "triple_click":
+        case "left_click_drag":
+        case "type":
+        case "key":
+        case "mouse_move":
+        case "scroll":
+        case "left_mouse_down":
         case "left_mouse_up": {
-          if (coordinate) {
-            const [x, y] = validateCoord(coordinate);
-            xdotool(`mousemove ${x} ${y} mouseup 1`);
-          } else {
-            xdotool(`mouseup 1`);
-          }
+          executeAction({ action, coordinate, text, scroll_direction, scroll_amount,
+                          start_coordinate, duration, region });
           break;
         }
 
         case "hold_key": {
           if (!text) throw new Error("text required for hold_key (the key to hold)");
           const k = mapKey(text);
-          const dur = duration || 1;
           xdotool(`keydown ${k}`);
-          dockerExec(`sleep ${dur}`);
-          xdotool(`keyup ${k}`);
+          try {
+            if (hold_key_action) {
+              // Execute nested action while key is held
+              executeAction(hold_key_action);
+            } else {
+              // Fallback: hold for duration seconds
+              const dur = duration || 1;
+              dockerExec(`sleep ${dur}`);
+            }
+          } finally {
+            xdotool(`keyup ${k}`);
+          }
           break;
         }
 
