@@ -1078,7 +1078,57 @@ Significant OCR accuracy improvement for text on colored/dark backgrounds.
 - Server version: 1.15.0
 
 ### Next Steps
+- [x] Tiling layout helper (auto split-screen arrangements) → done in cycle 22
 - [ ] `computer_type_file` — type large content via file (bypass xdotool limits)
 - [ ] Edge case testing: large files, special filenames, symlinks
 - [ ] Session replay with screenshot comparison
-- [ ] Tiling layout helper (auto split-screen arrangements)
+
+## Cycle 22 (2026-03-08)
+
+### New Features
+
+#### 1. `computer_window_tile` — Auto Window Tiling
+- 5 layout presets: `left_right`, `top_bottom`, `grid`, `cascade`, `thirds`
+- Optional `titles` array to select specific windows (in order), or auto-discover all visible app windows
+- Optional `gap` parameter for spacing between windows
+- `grid` auto-calculates NxM grid based on window count (ceil(sqrt(n)) cols)
+- `cascade` offsets windows 30px diagonally with 70% screen size
+- `thirds` splits screen into 3 equal vertical columns
+- Filters out desktop/panel windows automatically via `getVisibleWindows()` helper
+
+#### 2. DRY Window Helper Refactor
+- Extracted `findWindowByTitleOrId(title, window_id, cn)` — shared by 4 window tools
+- Extracted `getVisibleWindows(cn)` — returns named, visible app windows with geometry
+- Refactored `window_focus`, `window_move`, `window_resize`, `window_manage` to use shared helper
+- Eliminated 4x duplicated window search logic (~60 lines removed)
+
+#### 3. Version Fix
+- Server version bumped from 1.13.0 to 1.16.0 (was not bumped in cycles 14-21)
+
+### Real-World Dogfooding
+- Tiled Firefox + Mousepad + Terminal in `thirds` layout (3 equal columns)
+- Ran system info commands in terminal (uname, df, date)
+- Triple-clicked "Example Domain" in Firefox, ctrl+c copied, switched to Mousepad, ctrl+v pasted
+- Re-tiled Firefox + Mousepad in `left_right` for clean side-by-side view
+- All window tools (focus, move, resize, tile) work together smoothly
+
+### Verification Results
+- **sc-82**: ✅ 29 MCP tools loaded after hot restart (+1 new)
+- **sc-83**: ✅ `window_tile` left_right: Mousepad 512x768 at (0,0), Terminal 512x768 at (512,0)
+- **sc-84**: ✅ `window_tile` grid: 3 windows in 2x2 grid, correct auto-layout
+- **sc-85**: ✅ Refactored tools: focus, move, resize all work with shared helper
+- **sc-86**: ✅ Real-world workflow: tile, type, select, copy, paste across 3 apps
+
+### Commits
+1. `469660d` — feat: window tiling tool + DRY window helper refactor (v1.16.0)
+
+### Code Stats
+- MCP server: ~2593 lines (up from ~2503)
+- 29 MCP tools (up from 28)
+- Server version: 1.16.0
+
+### Next Steps
+- [ ] `computer_type_file` — type large content via file (bypass xdotool limits)
+- [ ] Edge case testing: large files, special filenames, symlinks
+- [ ] Session replay with screenshot comparison
+- [ ] `computer_window_tile` gap testing + cascade layout verification
