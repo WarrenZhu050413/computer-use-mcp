@@ -1939,7 +1939,49 @@ Major new tool — extracts the full accessibility tree from the desktop via AT-
 - Server version: 1.33.0
 
 ### Next Steps
-- [ ] Web content extraction in computer_navigate (return page text + title)
+- [x] Web content extraction in computer_navigate → done in cycle 41
 - [ ] Monitor for API updates (next check in ~2 cycles)
-- [ ] Accessibility-driven click helper (click element by role+name from a11y tree)
-- [ ] Real task: use a11y tree for productive work in VM
+- [x] Accessibility-driven click helper → done in cycle 41 (computer_a11y_click)
+- [x] Real task: use a11y tree for productive work in VM → done in cycle 41
+
+---
+
+## Cycle 41 (2026-03-08)
+
+### New Features
+
+#### computer_navigate `extract_content` param
+When `extract_content=true`, the navigate tool now also returns:
+- **Page title**: extracted from window title bar (strips " — Mozilla Firefox" suffix)
+- **Full page text**: via select-all + clipboard copy, with background clipboard restore
+
+This enables agents to read web page content without OCR — much faster and more accurate for text-heavy pages.
+
+#### computer_a11y_click (Tool #43)
+Click UI elements by accessibility role and name — no coordinates needed. Queries the AT-SPI2 accessibility tree to find matching elements, then clicks at their center.
+
+- **Parameters**: `role` (push button, link, menu item, etc.), `name` (substring match, case-insensitive), `app` (filter by app), `window_title` (filter by window), `click_type` (left/right/double), `index` (Nth match)
+- **AT-SPI2 query**: flat tree at depth 20, filters by role/name, returns all matches with bounding boxes
+- **Click execution**: converts a11y bbox center to API coordinates, performs click, returns screenshot
+- **Error handling**: descriptive messages for no matches, no bbox, AT-SPI failures
+
+#### Real-World Dogfooding
+- Navigated to example.com with `extract_content=true` — got title + full page text
+- Used `a11y_click` to click "Learn more" link by role+name — navigated to IANA page
+- Navigated to Hacker News with `extract_content=true` — extracted all 30 story titles + metadata
+- Used `a11y_click` to click article link by partial name match — opened blog post
+- Both tools combined enable semantic web browsing: read content → click by meaning, not coordinates
+
+### Commits
+1. `174ebb0` — feat: add extract_content to computer_navigate, add computer_a11y_click tool
+
+### Code Stats
+- MCP server: ~5050 lines (up from ~4886)
+- 43 MCP tools (up from 42)
+- Server version: 1.34.0
+
+### Next Steps
+- [ ] Monitor for API updates (next check in ~2 cycles)
+- [ ] Accessibility-driven form filling (type into fields by a11y name)
+- [ ] Browser tab management tool (list/close/switch tabs)
+- [ ] Performance: reduce screenshot latency on high-frequency operations
