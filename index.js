@@ -6013,19 +6013,18 @@ Returns a screenshot when the condition is met (or on timeout).`,
         await new Promise(r => setTimeout(r, intervalMs));
       }
 
-      // Timeout
+      // Timeout — expected outcome, not an error (matches wait_for_text pattern)
       const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
       const ss = takeScreenshot(cn);
       const matchInfo = mode === "appear"
         ? `No matching element found after ${elapsed}s (${polls} polls).`
-        : `Element still present after ${elapsed}s (${polls} polls): ${lastMatches[0]?.role} "${lastMatches[0]?.name}"`;
+        : `Element still present after ${elapsed}s (${polls} polls): ${lastMatches[0]?.role || "?"} "${lastMatches[0]?.name || "?"}"`;
 
       return {
         content: [
           { type: "image", data: ss.data, mimeType: ss.mimeType },
           { type: "text", text: `Timeout: ${matchInfo}` }
-        ],
-        isError: true
+        ]
       };
     } catch (err) {
       return { content: [{ type: "text", text: `A11y wait error: ${err.message}` }], isError: true };
