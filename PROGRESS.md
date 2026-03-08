@@ -131,9 +131,65 @@ Successfully completed full browser automation flow:
 - MCP server code: ~445 lines in index.js
 
 ### Next Steps
-- [ ] Verify type newline fix end-to-end after MCP reload
-- [ ] Verify computer_bash execFileSync fix end-to-end after MCP reload
-- [ ] Research agent results (Anthropic reference impl comparison)
+- [x] Verify type newline fix end-to-end after MCP reload → ✅ cycle 4
+- [x] Verify computer_bash execFileSync fix end-to-end after MCP reload → ✅ cycle 4
+- [x] Research agent results (Anthropic reference impl comparison) → ✅ cycle 4
 - [ ] Multi-container support
 - [ ] Resolution switching
 - [ ] `display_number` param support
+
+---
+
+## Cycle 4 (2026-03-08)
+
+### Critical Fix: MCP Server Path
+- **Root cause**: `.mcp.json` pointed to `/Users/kevinster/computer-use-mcp/index.js` (main repo, `master` branch), NOT the worktree. All cycle 3 fixes existed only in the worktree but the running MCP server used old code.
+- **Fix**: Updated `.mcp.json` to point to worktree's `index.js`. Also ran `npm install` (node_modules were missing in worktree).
+- **Lesson**: Always verify the MCP server is running the code you think it is.
+
+### End-to-End Verification (Cycle 3 Fixes)
+1. **computer_bash $var isolation** ✅ — `echo $HOME` returns `/home/agent` (container), not `/Users/kevinster` (host)
+2. **Type with newlines** ✅ — Heredoc typed with proper newlines, `cat` output showed separate lines
+3. **Shell construct isolation** ✅ — `$HOME`, backticks, single quotes all handled correctly in container
+
+### Full 16-Action Test Suite ✅
+All actions verified end-to-end through MCP:
+screenshot, left_click, right_click, double_click, triple_click, left_click_drag, type, key, mouse_move, scroll, left_mouse_down, left_mouse_up, hold_key (duration), wait, zoom, cursor_position
+
+### Research Agent Findings (Anthropic Reference Comparison)
+**Overall: 8/10** — highly compliant, small fixes to reach 9/10
+- ✅ All 16 base actions implemented
+- ✅ Screenshot capture (base64 PNG)
+- ✅ Coordinate validation
+- ✅ Click/scroll modifiers via `text` param
+- ✅ Type with newline handling
+- ✅ Error handling with screenshot on failure
+- **Bonus features** (non-standard, documented as extensions):
+  - `cursor_position` action
+  - `hold_key_action` nested action support
+  - `left_mouse_down`/`up` with optional coordinates
+- **Fixed this cycle**:
+  - scroll_amount >= 0 validation
+  - duration bounds (0 < d <= 100) for hold_key and wait
+
+### Refactoring
+1. **Dropped `execSync` entirely** — all Docker calls use `execFileSync` with arg arrays
+2. **Environment-driven config** — `DISPLAY_WIDTH`, `DISPLAY_HEIGHT`, `SCREENSHOT_DELAY_MS` all configurable via env vars
+3. MCP server code: ~450 lines in index.js
+
+### Real-World Testing
+- Browsed Hacker News: URL navigation, page load, article click, back button
+- Opened arXiv paper, zoomed into abstract for reading
+- Full Firefox workflow with multiple tabs
+
+### Commits
+1. `8e38b52` — refactor: drop execSync entirely, make display config env-driven
+2. `6d7b83a` — fix: add input validation for scroll_amount and duration
+
+### Next Steps
+- [ ] Multi-container support (spawn/destroy environments on demand)
+- [ ] Resolution switching (with coordinate scaling for > 1568px)
+- [ ] `display_number` param support
+- [ ] Session recording/replay
+- [ ] File exchange helpers via /workspace
+- [ ] Browser automation helpers
