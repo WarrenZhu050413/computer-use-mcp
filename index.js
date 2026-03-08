@@ -6,6 +6,10 @@ import { execFileSync } from "child_process";
 import { randomUUID } from "crypto";
 
 const CONTAINER = process.env.CONTAINER_NAME || "computer-use";
+const CONTAINER_IMAGE = process.env.CONTAINER_IMAGE || "computer-use-env";
+const CONTAINER_VNC_PORT = process.env.CONTAINER_VNC_PORT || "5900";
+const CONTAINER_NOVNC_PORT = process.env.CONTAINER_NOVNC_PORT || "6080";
+const CONTAINER_WORKSPACE = process.env.CONTAINER_WORKSPACE || `${process.env.HOME}/computer-use-workspace`;
 const DISPLAY_WIDTH = parseInt(process.env.DISPLAY_WIDTH || "1024", 10);
 const DISPLAY_HEIGHT = parseInt(process.env.DISPLAY_HEIGHT || "768", 10);
 const SCREENSHOT_DELAY_MS = parseInt(process.env.SCREENSHOT_DELAY_MS || "1000", 10);
@@ -26,9 +30,17 @@ function isContainerRunning() {
 
 function restartContainer() {
   try {
-    execFileSync("docker", ["start", CONTAINER], { timeout: 30000 });
-    // Wait for display to come up
-    for (let i = 0; i < 10; i++) {
+    // Full recreation: rm + run (docker start leaves stale X11 lock files)
+    try { execFileSync("docker", ["rm", "-f", CONTAINER], { timeout: 10000 }); } catch {}
+    execFileSync("docker", [
+      "run", "-d", "--name", CONTAINER,
+      "-p", `${CONTAINER_VNC_PORT}:5900`,
+      "-p", `${CONTAINER_NOVNC_PORT}:6080`,
+      "-v", `${CONTAINER_WORKSPACE}:/workspace`,
+      CONTAINER_IMAGE
+    ], { timeout: 30000 });
+    // Wait for display to come up (container startup takes ~5-8s)
+    for (let i = 0; i < 15; i++) {
       try {
         execFileSync("docker", [
           "exec", CONTAINER, "bash", "-c", "DISPLAY=:1 xdotool getdisplaygeometry"
