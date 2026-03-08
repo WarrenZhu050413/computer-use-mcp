@@ -2143,7 +2143,48 @@ Select, check, or toggle UI elements by accessibility role/name. Completes the a
 - Server version: 1.38.0
 
 ### Next Steps
+- [x] Test a11y_fill with tab_between=true and submit=true modes
 - [ ] Performance: reduce screenshot latency on high-frequency operations
 - [ ] A11y-driven scroll (scroll within specific elements, not just the viewport)
-- [ ] Test a11y_fill with tab_between=true and submit=true modes
 - [ ] Monitor for Anthropic API updates (next check in ~1 cycle)
+
+## Cycle 46 (2026-03-08)
+
+### Bug Fixes
+
+#### A11y showing-state fix (da1cec2)
+Firefox's a11y tree sometimes produces duplicate entries for the same element. The first (non-showing) entry may have stale state — e.g., a checkbox reports "checked" when it's actually unchecked visually. Fixed by sorting all a11y matches to prefer elements with "showing" state.
+
+- **Before**: `a11y_select` on unchecked Bacon checkbox falsely reported "already_checked"
+- **After**: Correctly clicks the checkbox (verified on httpbin form)
+- Affects: `queryA11yFlat`, `a11y_select`, `a11y_fill`, and all a11y tools
+
+### New Features
+
+#### sortByNameRelevance helper (45578c3)
+Smarter a11y element matching that prefers: exact name > starts-with > shorter name (closer match). Replaces simple substring matching.
+
+- **Before**: `name: "Delivery"` matched "Preferred delivery time" before "Delivery instructions"
+- **After**: Matches "Delivery instructions" first (starts with query, shorter name)
+- Applied to: `queryA11yFlat`, `a11y_select`, `a11y_fill`
+
+### Testing
+
+#### a11y_fill modes verified
+- `tab_between=true`: fills fields using Tab between them instead of clicking each ✓
+- `submit=true`: presses Enter after last field to submit form ✓
+- Full form flow on httpbin.org: fill 3 text fields + select radio + check 2 checkboxes + submit → JSON response confirmed all data ✓
+
+### Commits
+1. `da1cec2` — fix: prefer 'showing' a11y elements over duplicates with stale state
+2. `45578c3` — feat: add sortByNameRelevance for smarter a11y element matching
+
+### Code Stats
+- MCP server: ~5850 lines
+- 48 MCP tools (unchanged)
+- Server version: 1.39.0
+
+### Next Steps
+- [ ] Performance: reduce screenshot latency on high-frequency operations
+- [ ] A11y-driven scroll (scroll within specific elements, not just the viewport)
+- [ ] Monitor for Anthropic API updates
