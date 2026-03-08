@@ -5011,6 +5011,34 @@ server.tool(
   }
 );
 
+// ── A11y name relevance sort ──────────────────────────────────────
+// Sort a11y matches by name relevance to the query string.
+// Priority: exact > starts-with > shorter name (closer match).
+// Also prefers "showing" elements over non-showing (Firefox duplicates).
+function sortByNameRelevance(matches, query) {
+  if (!query) return matches;
+  const q = query.toLowerCase();
+  matches.sort((a, b) => {
+    // 1. Prefer "showing" state (visible on screen)
+    const aShowing = (a.states || []).includes("showing") ? 0 : 1;
+    const bShowing = (b.states || []).includes("showing") ? 0 : 1;
+    if (aShowing !== bShowing) return aShowing - bShowing;
+    // 2. Prefer exact name match
+    const aName = (a.name || "").toLowerCase();
+    const bName = (b.name || "").toLowerCase();
+    const aExact = aName === q ? 0 : 1;
+    const bExact = bName === q ? 0 : 1;
+    if (aExact !== bExact) return aExact - bExact;
+    // 3. Prefer starts-with
+    const aStarts = aName.startsWith(q) ? 0 : 1;
+    const bStarts = bName.startsWith(q) ? 0 : 1;
+    if (aStarts !== bStarts) return aStarts - bStarts;
+    // 4. Shorter name = closer match
+    return aName.length - bName.length;
+  });
+  return matches;
+}
+
 // ── Shared A11y query helper ──────────────────────────────────────
 function queryA11yFlat({ role, name, app, window_title, container_name, depth = 20 }) {
   const cn = container_name || DEFAULT_CONTAINER;
@@ -5046,13 +5074,8 @@ function queryA11yFlat({ role, name, app, window_title, container_name, depth = 
     return true;
   });
 
-  // Sort: prefer "showing" elements first (Firefox a11y tree sometimes has duplicate
-  // entries for the same element — one without "showing" may have stale state)
-  matches.sort((a, b) => {
-    const aShowing = (a.states || []).includes("showing") ? 0 : 1;
-    const bShowing = (b.states || []).includes("showing") ? 0 : 1;
-    return aShowing - bShowing;
-  });
+  // Sort by relevance: showing state + name similarity
+  sortByNameRelevance(matches, name);
 
   return { matches, totalNodes: nodes.length, cn };
 }
@@ -5542,12 +5565,8 @@ server.tool(
           return true;
         });
 
-        // Re-sort: prefer "showing" elements (correct state) over non-showing duplicates
-        elemMatches.sort((a, b) => {
-          const aShowing = (a.states || []).includes("showing") ? 0 : 1;
-          const bShowing = (b.states || []).includes("showing") ? 0 : 1;
-          return aShowing - bShowing;
-        });
+        // Sort by relevance: showing state + name similarity
+        sortByNameRelevance(elemMatches, elem.name);
 
         if (elemMatches.length === 0) {
           const desc = [elem.role && `role="${elem.role}"`, elem.name && `name="${elem.name}"`].filter(Boolean).join(", ");
@@ -5722,6 +5741,9 @@ server.tool(
           if (matchName && !nodeName.includes(matchName)) return false;
           return true;
         });
+
+        // Sort by relevance: showing state + name similarity
+        sortByNameRelevance(fieldMatches, field.name);
 
         if (fieldMatches.length === 0) {
           const desc = [field.role && `role="${field.role}"`, field.name && `name="${field.name}"`].filter(Boolean).join(", ");
