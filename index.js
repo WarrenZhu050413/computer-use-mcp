@@ -5944,8 +5944,10 @@ server.tool(
           chars: field.text.length,
         });
 
-        // Small delay between fields
+        // Dismiss autocomplete dropdown before clicking next field
+        // (Firefox autocomplete can intercept the click on the next field)
         if (fi < fields.length - 1) {
+          xdotool("key Escape", cn);
           await new Promise(r => setTimeout(r, 200));
         }
       }
