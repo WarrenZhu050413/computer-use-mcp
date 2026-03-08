@@ -525,7 +525,7 @@ function executeAction({ action, coordinate, text, scroll_direction, scroll_amou
 
 const server = new McpServer({
   name: "computer-use",
-  version: "1.42.1",
+  version: "1.43.0",
 });
 
 const actionSchema = {
@@ -4934,8 +4934,9 @@ server.tool(
   "computer_a11y_click",
   "Click a UI element by its accessibility role and/or name, without needing to know coordinates. Queries the AT-SPI2 accessibility tree to find the element, then clicks at its center. Much more reliable than OCR+click for buttons, links, menus, text fields, etc. Supports filtering by app/window to narrow the search.",
   {
-    role: z.string().optional().describe("Accessibility role to match (case-insensitive): 'push button', 'link', 'menu item', 'text', 'check box', 'radio button', 'combo box', 'tab', 'toggle button', etc."),
+    role: z.string().optional().describe("Accessibility role to match (case-insensitive substring by default): 'push button', 'link', 'menu item', 'text', 'check box', 'radio button', 'combo box', 'tab', 'toggle button', etc."),
     name: z.string().optional().describe("Element name/label to match (substring, case-insensitive). E.g. 'Submit', 'Login', 'File', 'Search'"),
+    exact_role: z.boolean().default(false).describe("If true, match role exactly instead of substring. Use when substring matching returns unwanted results (e.g. 'page tab' also matching 'page tab list'). Default: false."),
     app: z.string().optional().describe("Filter by application name (e.g. 'Firefox', 'xfce4-terminal')"),
     window_title: z.string().optional().describe("Filter by window title substring"),
     click_type: z.enum(["left_click", "right_click", "double_click"]).default("left_click").describe("Type of click to perform (default: left_click)"),
@@ -4943,7 +4944,7 @@ server.tool(
     ensure_visible: z.boolean().default(true).describe("Auto-scroll to bring element into view before clicking (default: true). Detects off-screen elements via 'showing' state and scrolls the viewport."),
     container_name: z.string().optional().describe("Target container (default: primary)"),
   },
-  async ({ role, name, app, window_title, click_type, index, ensure_visible, container_name }) => {
+  async ({ role, name, exact_role, app, window_title, click_type, index, ensure_visible, container_name }) => {
     const cn = container_name || DEFAULT_CONTAINER;
     try {
       if (!role && !name) {
@@ -4951,8 +4952,8 @@ server.tool(
       }
 
       const q = ensure_visible
-        ? await scrollToA11yElement({ role, name, app, window_title, container_name: cn, index: index || 0 })
-        : queryA11yFlat({ role, name, app, window_title, container_name: cn });
+        ? await scrollToA11yElement({ role, name, app, window_title, container_name: cn, index: index || 0, exact_role })
+        : queryA11yFlat({ role, name, app, window_title, container_name: cn, exact_role });
       if (q.error) return { content: [{ type: "text", text: q.error }], isError: true };
 
       if (q.matches.length === 0) {
@@ -5039,9 +5040,9 @@ function sortByNameRelevance(matches, query) {
 // Scrolls the viewport to bring an a11y element into view. Returns the same
 // format as queryA11yFlat — drop-in replacement with scrolling.
 // Checks "showing" state to detect visibility. Scroll loop with max 10 attempts.
-async function scrollToA11yElement({ role, name, app, window_title, container_name, index = 0, depth = 20 }) {
+async function scrollToA11yElement({ role, name, app, window_title, container_name, index = 0, depth = 20, exact_role = false }) {
   const cn = container_name || DEFAULT_CONTAINER;
-  let q = queryA11yFlat({ role, name, app, window_title, container_name: cn, depth });
+  let q = queryA11yFlat({ role, name, app, window_title, container_name: cn, depth, exact_role });
   if (q.error || q.matches.length === 0) return q;
 
   const env = environments.get(cn);
@@ -5079,7 +5080,7 @@ async function scrollToA11yElement({ role, name, app, window_title, container_na
     await new Promise(r => setTimeout(r, 600));
 
     // Re-query for fresh coordinates
-    q = queryA11yFlat({ role, name, app, window_title, container_name: cn, depth });
+    q = queryA11yFlat({ role, name, app, window_title, container_name: cn, depth, exact_role });
     if (q.error || q.matches.length === 0) break;
 
     targetIdx = Math.min(index, q.matches.length - 1);
@@ -5091,7 +5092,7 @@ async function scrollToA11yElement({ role, name, app, window_title, container_na
 }
 
 // ── Shared A11y query helper ──────────────────────────────────────
-function queryA11yFlat({ role, name, app, window_title, container_name, depth = 20 }) {
+function queryA11yFlat({ role, name, app, window_title, container_name, depth = 20, exact_role = false }) {
   const cn = container_name || DEFAULT_CONTAINER;
   let cmd = `python3 /usr/local/bin/a11y_tree.py --compact --flat --depth ${depth}`;
   if (app) {
@@ -5120,7 +5121,7 @@ function queryA11yFlat({ role, name, app, window_title, container_name, depth = 
     if (!node.bbox || node.bbox.width <= 0 || node.bbox.height <= 0) return false;
     const nodeRole = (node.role || "").toLowerCase();
     const nodeName = (node.name || "").toLowerCase();
-    if (matchRole && !nodeRole.includes(matchRole)) return false;
+    if (matchRole && (exact_role ? nodeRole !== matchRole : !nodeRole.includes(matchRole))) return false;
     if (matchName && !nodeName.includes(matchName)) return false;
     return true;
   });
@@ -5140,13 +5141,14 @@ server.tool(
     name: z.string().optional().describe("Element name/label to match (substring, case-insensitive). E.g. 'Search', 'Email', 'Password', 'URL'"),
     text: z.string().describe("Text to type into the element"),
     clear_first: z.boolean().default(true).describe("Select all + delete before typing (default: true). Set false to append."),
+    exact_role: z.boolean().default(false).describe("If true, match role exactly instead of substring. Default: false."),
     app: z.string().optional().describe("Filter by application name (e.g. 'Firefox', 'xfce4-terminal')"),
     window_title: z.string().optional().describe("Filter by window title substring"),
     index: z.number().optional().describe("If multiple elements match, target the Nth one (0-based, default 0)"),
     ensure_visible: z.boolean().default(true).describe("Auto-scroll to bring element into view before typing (default: true)."),
     container_name: z.string().optional().describe("Target container (default: primary)"),
   },
-  async ({ role, name, text, clear_first, app, window_title, index, ensure_visible, container_name }) => {
+  async ({ role, name, text, clear_first, exact_role, app, window_title, index, ensure_visible, container_name }) => {
     const cn = container_name || DEFAULT_CONTAINER;
     try {
       // Default to common text input roles if no role specified
@@ -5156,8 +5158,8 @@ server.tool(
       }
 
       const q = ensure_visible
-        ? await scrollToA11yElement({ role: effectiveRole, name, app, window_title, container_name: cn, index: index || 0 })
-        : queryA11yFlat({ role: effectiveRole, name, app, window_title, container_name: cn });
+        ? await scrollToA11yElement({ role: effectiveRole, name, app, window_title, container_name: cn, index: index || 0, exact_role })
+        : queryA11yFlat({ role: effectiveRole, name, app, window_title, container_name: cn, exact_role });
       if (q.error) return { content: [{ type: "text", text: q.error }], isError: true };
 
       if (q.matches.length === 0) {
@@ -5241,13 +5243,14 @@ server.tool(
   {
     role: z.string().optional().describe("Accessibility role to match (e.g. 'push button', 'check box', 'text', 'link')"),
     name: z.string().optional().describe("Element name/label to match (substring, case-insensitive)"),
+    exact_role: z.boolean().default(false).describe("If true, match role exactly instead of substring. Default: false."),
     app: z.string().optional().describe("Filter by application name"),
     window_title: z.string().optional().describe("Filter by window title substring"),
     max_results: z.number().default(10).describe("Maximum number of matching elements to return (default: 10)"),
     include_text: z.boolean().default(true).describe("Include text content from Text interface (default: true)"),
     container_name: z.string().optional().describe("Target container (default: primary)"),
   },
-  async ({ role, name, app, window_title, max_results, include_text, container_name }) => {
+  async ({ role, name, exact_role, app, window_title, max_results, include_text, container_name }) => {
     const cn = container_name || DEFAULT_CONTAINER;
     try {
       if (!role && !name) {
@@ -5282,7 +5285,7 @@ server.tool(
       const matches = nodes.filter(node => {
         const nodeRole = (node.role || "").toLowerCase();
         const nodeName = (node.name || "").toLowerCase();
-        if (matchRole && !nodeRole.includes(matchRole)) return false;
+        if (matchRole && (exact_role ? nodeRole !== matchRole : !nodeRole.includes(matchRole))) return false;
         if (matchName && !nodeName.includes(matchName)) return false;
         return true;
       });
@@ -5652,12 +5655,13 @@ server.tool(
       value: z.string().optional().describe("For combo boxes: option text to select. For checkboxes/toggles: 'checked' or 'unchecked' to set desired state (omit to toggle)."),
       index: z.number().optional().describe("If multiple elements match, target the Nth one (0-based, default 0)"),
     })).min(1).max(20).describe("Array of elements to select/toggle. Each needs at least 'name' or 'role'."),
+    exact_role: z.boolean().default(false).describe("If true, match element roles exactly instead of substring. Default: false."),
     app: z.string().optional().describe("Filter by application name (e.g. 'Firefox')"),
     window_title: z.string().optional().describe("Filter by window title substring"),
     ensure_visible: z.boolean().default(true).describe("Auto-scroll to bring each element into view before interacting (default: true)."),
     container_name: z.string().optional().describe("Target container (default: primary)"),
   },
-  async ({ elements, app, window_title, ensure_visible, container_name }) => {
+  async ({ elements, exact_role, app, window_title, ensure_visible, container_name }) => {
     const cn = container_name || DEFAULT_CONTAINER;
     try {
       // Validate elements
@@ -5687,7 +5691,7 @@ server.tool(
         const elemMatches = allNodes.filter(node => {
           const nodeRole = (node.role || "").toLowerCase();
           const nodeName = (node.name || "").toLowerCase();
-          if (matchRole && !nodeRole.includes(matchRole)) return false;
+          if (matchRole && (exact_role ? nodeRole !== matchRole : !nodeRole.includes(matchRole))) return false;
           if (matchName && !nodeName.includes(matchName)) return false;
           return true;
         });
@@ -5845,6 +5849,7 @@ server.tool(
       clear_first: z.boolean().optional().default(true).describe("Clear field before typing (default: true)"),
       index: z.number().optional().describe("If multiple elements match, target the Nth one (0-based, default 0)"),
     })).min(1).max(20).describe("Array of fields to fill. Each needs at least 'name' or 'role' + 'text'."),
+    exact_role: z.boolean().default(false).describe("If true, match field roles exactly instead of substring. Default: false."),
     app: z.string().optional().describe("Filter by application name (e.g. 'Firefox')"),
     window_title: z.string().optional().describe("Filter by window title substring"),
     submit: z.boolean().default(false).describe("Press Enter/Return after filling the last field (e.g. to submit a form)"),
@@ -5852,7 +5857,7 @@ server.tool(
     ensure_visible: z.boolean().default(true).describe("Auto-scroll to bring each field into view before filling (default: true)."),
     container_name: z.string().optional().describe("Target container (default: primary)"),
   },
-  async ({ fields, app, window_title, submit, tab_between, ensure_visible, container_name }) => {
+  async ({ fields, exact_role, app, window_title, submit, tab_between, ensure_visible, container_name }) => {
     const cn = container_name || DEFAULT_CONTAINER;
     try {
       // Validate that each field has at least name or role
@@ -5878,7 +5883,7 @@ server.tool(
         const fieldMatches = allNodes.filter(node => {
           const nodeRole = (node.role || "").toLowerCase();
           const nodeName = (node.name || "").toLowerCase();
-          if (matchRole && !nodeRole.includes(matchRole)) return false;
+          if (matchRole && (exact_role ? nodeRole !== matchRole : !nodeRole.includes(matchRole))) return false;
           if (matchName && !nodeName.includes(matchName)) return false;
           return true;
         });
@@ -5997,6 +6002,7 @@ Returns a screenshot when the condition is met (or on timeout).`,
   {
     role: z.string().optional().describe("Accessibility role to match (e.g. 'push button', 'link', 'dialog', 'alert', 'progress bar')"),
     name: z.string().optional().describe("Element name/label to match (substring, case-insensitive). E.g. 'Submit', 'Loading', 'Error'"),
+    exact_role: z.boolean().default(false).describe("If true, match role exactly instead of substring. Default: false."),
     mode: z.enum(["appear", "disappear"]).default("appear").describe("'appear': wait until element exists (default). 'disappear': wait until element is gone."),
     timeout: z.number().default(10).describe("Max seconds to wait (default: 10, max: 60)"),
     interval: z.number().default(500).describe("Poll interval in ms (default: 500, min: 200, max: 5000)"),
@@ -6006,7 +6012,7 @@ Returns a screenshot when the condition is met (or on timeout).`,
     require_showing: z.boolean().default(false).describe("In appear mode, require element to have 'showing' state (visible on screen), not just present in tree"),
     container_name: z.string().optional().describe("Target container (default: primary)"),
   },
-  async ({ role, name, mode, timeout, interval, click, app, window_title, require_showing, container_name }) => {
+  async ({ role, name, exact_role, mode, timeout, interval, click, app, window_title, require_showing, container_name }) => {
     const cn = container_name || DEFAULT_CONTAINER;
     try {
       if (!role && !name) {
@@ -6020,7 +6026,7 @@ Returns a screenshot when the condition is met (or on timeout).`,
       let polls = 0;
 
       while (Date.now() - startTime < timeoutMs) {
-        const q = queryA11yFlat({ role, name, app, window_title, container_name: cn });
+        const q = queryA11yFlat({ role, name, app, window_title, container_name: cn, exact_role });
         polls++;
 
         if (q.error) {
