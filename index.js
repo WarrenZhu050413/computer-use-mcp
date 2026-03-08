@@ -284,18 +284,47 @@ function executeAction({ action, coordinate, text, scroll_direction, scroll_amou
 
     case "type": {
       if (!text) throw new Error("text required for type action");
-      // Split on newlines and press Return between segments (xdotool --file drops \n)
-      const lines = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
-      for (let i = 0; i < lines.length; i++) {
-        if (lines[i].length > 0) {
-          const b64Text = Buffer.from(lines[i]).toString("base64");
-          const id = randomUUID().slice(0, 8);
-          const path = `/tmp/_type_${id}.txt`;
-          dockerExec(`echo ${b64Text} | base64 -d > ${path}`, 30000, containerName);
-          dockerExec(`xdotool type --clearmodifiers --delay ${TYPING_DELAY_MS} --file ${path} && rm -f ${path}`, 30000, containerName);
+      // Check if text contains non-ASCII characters (xdotool type crashes on multi-byte)
+      const hasNonAscii = /[^\x00-\x7F]/.test(text);
+      if (hasNonAscii) {
+        // Clipboard paste fallback for unicode text:
+        // 1. Save original clipboard
+        // 2. Set clipboard to our text
+        // 3. Paste via ctrl+shift+v (xfce4-terminal) — works universally in our XFCE env
+        // 4. Restore original clipboard
+        let originalClipboard = "";
+        try {
+          originalClipboard = dockerExec(`xclip -selection clipboard -o 2>/dev/null || true`, 5000, containerName).toString();
+        } catch { /* empty clipboard is fine */ }
+        const b64Full = Buffer.from(text).toString("base64");
+        const id = randomUUID().slice(0, 8);
+        const tmpPath = `/tmp/_type_uni_${id}.txt`;
+        dockerExec(`echo ${b64Full} | base64 -d > ${tmpPath}`, 30000, containerName);
+        dockerExec(`cat ${tmpPath} | xclip -selection clipboard -i && rm -f ${tmpPath}`, 30000, containerName);
+        // Paste: ctrl+shift+v works in xfce4-terminal; for GUI apps, ctrl+v also works
+        // We send ctrl+shift+v (no --clearmodifiers, which breaks modifier combos)
+        xdotool("key ctrl+shift+v", containerName);
+        // Restore original clipboard after a brief delay
+        if (originalClipboard) {
+          const b64Orig = Buffer.from(originalClipboard).toString("base64");
+          const origPath = `/tmp/_type_orig_${id}.txt`;
+          dockerExec(`sleep 0.2 && echo ${b64Orig} | base64 -d > ${origPath} && cat ${origPath} | xclip -selection clipboard -i && rm -f ${origPath}`, 30000, containerName);
         }
-        if (i < lines.length - 1) {
-          xdotool("key Return", containerName);
+      } else {
+        // ASCII text: use xdotool type (fast, reliable for ASCII)
+        // Split on newlines and press Return between segments (xdotool --file drops \n)
+        const lines = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+        for (let i = 0; i < lines.length; i++) {
+          if (lines[i].length > 0) {
+            const b64Text = Buffer.from(lines[i]).toString("base64");
+            const id = randomUUID().slice(0, 8);
+            const path = `/tmp/_type_${id}.txt`;
+            dockerExec(`echo ${b64Text} | base64 -d > ${path}`, 30000, containerName);
+            dockerExec(`xdotool type --clearmodifiers --delay ${TYPING_DELAY_MS} --file ${path} && rm -f ${path}`, 30000, containerName);
+          }
+          if (i < lines.length - 1) {
+            xdotool("key Return", containerName);
+          }
         }
       }
       break;
@@ -304,7 +333,8 @@ function executeAction({ action, coordinate, text, scroll_direction, scroll_amou
     case "key": {
       if (!text) throw new Error("text required for key action");
       const mapped = mapKey(text);
-      xdotool(`key --clearmodifiers -- ${mapped}`, containerName);
+      // Note: --clearmodifiers breaks modifier combos (e.g. ctrl+shift+v) so we don't use it
+      xdotool(`key -- ${mapped}`, containerName);
       break;
     }
 
