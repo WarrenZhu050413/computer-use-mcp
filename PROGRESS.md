@@ -759,7 +759,58 @@ Tested full workflow inside the VM:
 - Server version: 1.9.0
 
 ### Next Steps
+- [x] `computer_wait_for` — poll screenshots waiting for visual state change → cycle 16
 - [ ] `computer_type_file` — type large content via file (bypass xdotool limits)
 - [ ] Edge case testing: large files, special filenames, symlinks
-- [ ] `computer_wait_for` — poll screenshots waiting for visual state change
 - [ ] Session replay with screenshot comparison (diff against recorded screenshots)
+
+---
+
+## Cycle 16 (2026-03-08)
+
+### computer_wait_for — Visual State Polling
+New tool for waiting on display state changes. Essential for real computer automation — replaces guessed `wait` durations with visual confirmation.
+
+**Two modes:**
+- `stable`: Wait until screen stops changing (N consecutive identical screenshots). Use for: page load complete, animation ended, file operation finished.
+- `change`: Wait until screen differs from current state. Use for: command produced output, dialog appeared, download completed.
+
+**Parameters:**
+- `mode`: "stable" (default) or "change"
+- `region`: Optional [x1, y1, x2, y2] to monitor only a portion of screen (avoids false triggers from clock, cursor blink)
+- `timeout`: 1-60 seconds (default: 10)
+- `interval`: 0.5-10 seconds between checks (default: 1)
+- `stable_count`: 2-10 consecutive identical frames needed for stable mode (default: 2)
+- `container_name`: Optional multi-container targeting
+
+**Implementation:**
+- MD5 hash of screenshot base64 data for fast comparison
+- Region mode: scrot + ImageMagick crop before hashing (same approach as zoom)
+- Returns the final screenshot + status message with timing details
+- Graceful timeout with clear messaging (check count, elapsed time)
+
+### Verification Results
+- **sc-52**: ✅ Tool loaded with correct schema after hot restart
+- **sc-53**: ✅ Stable mode on static screen — returned in 1.4s (2 identical frames, 2 checks)
+- **sc-54**: ✅ Change mode — detected Ctrl+T new tab opening after 1.5s (3 checks at 0.5s interval)
+- **sc-55**: ✅ Region mode — cropped tab bar [0,60,1024,90], stable with 3 identical frames in 1.7s
+- **sc-56**: ✅ Timeout — change mode on static region timed out gracefully after 3.9s with clear message
+
+### Dogfooding: Wait for Page Load
+- Navigated to Hacker News with 1s wait (fast, minimal)
+- Used `wait_for` stable mode on content region [80,220,950,760] — confirmed page fully rendered in 0.9s
+- Pattern: `navigate(url, wait_seconds=1)` + `wait_for(mode="stable", region=content_area)` is more reliable than guessing wait times
+
+### Commits
+1. `e3abf39` — feat: computer_wait_for — visual state polling tool
+
+### Code Stats
+- MCP server: ~1808 lines (up from ~1683)
+- 22 MCP tools (added: computer_wait_for)
+- Server version: 1.10.0
+
+### Next Steps
+- [ ] `computer_type_file` — type large content via file (bypass xdotool limits)
+- [ ] Edge case testing: large files, special filenames, symlinks
+- [ ] Session replay with screenshot comparison (diff against recorded screenshots)
+- [ ] `computer_scroll_to` — scroll until visual target appears (combines scroll + wait_for)
