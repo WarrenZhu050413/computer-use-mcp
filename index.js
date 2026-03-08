@@ -2669,6 +2669,218 @@ Optionally auto-clicks the found text.`,
   }
 );
 
+// === computer_screenshot_diff — visual comparison with named baselines ===
+server.tool(
+  "computer_screenshot_diff",
+  `Compare screenshots to detect visual differences. Three modes:
+- "save": Save current screenshot as a named baseline for later comparison.
+- "compare": Compare current screenshot to a saved baseline. Returns a visual diff image, difference percentage, and bounding box of changed region.
+- "list": List all saved baselines with their dimensions and timestamps.
+Baselines are stored inside the container at /workspace/.baselines/. Useful for visual regression testing, monitoring UI changes, or verifying that actions produced expected results.`,
+  {
+    mode: z.enum(["save", "compare", "list"]).describe("'save' = capture baseline, 'compare' = diff against baseline, 'list' = show saved baselines"),
+    name: z.string().optional().describe("Baseline name (required for save/compare). Alphanumeric, dashes, underscores only."),
+    region: z.array(z.number()).optional().describe("[x1, y1, x2, y2] — compare only this region (API coordinates). Omit for full screen."),
+    fuzz: z.number().min(0).max(100).default(5).describe("Color difference threshold percentage (0=exact, 100=all match). Default 5 — ignores minor compression artifacts."),
+    container_name: z.string().optional().describe("Target container (default: primary)"),
+  },
+  async ({ mode, name, region, fuzz, container_name }) => {
+    try {
+      const cn = resolveContainer(container_name);
+      const baselineDir = "/workspace/.baselines";
+
+      // Ensure baselines directory exists
+      try { dockerExec(`mkdir -p ${baselineDir}`, 5000, cn); } catch {}
+
+      if (mode === "list") {
+        try {
+          const listing = dockerExec(`ls -la ${baselineDir}/*.png 2>/dev/null || echo "(no baselines)"`, 10000, cn).toString().trim();
+          if (listing === "(no baselines)") {
+            return { content: [{ type: "text", text: "No baselines saved yet. Use mode='save' to create one." }] };
+          }
+          // Get detailed info for each baseline
+          const files = dockerExec(`ls ${baselineDir}/*.png 2>/dev/null`, 5000, cn).toString().trim().split("\n").filter(Boolean);
+          const details = files.map(f => {
+            const fname = f.split("/").pop().replace(".png", "");
+            let info = "";
+            try {
+              info = dockerExec(`identify -format '%wx%h %b' '${f}'`, 5000, cn).toString().trim();
+            } catch { info = "unknown"; }
+            let mtime = "";
+            try {
+              mtime = dockerExec(`stat -c '%y' '${f}' 2>/dev/null | cut -d. -f1`, 5000, cn).toString().trim();
+            } catch {}
+            return `  ${fname}: ${info} (${mtime})`;
+          });
+          return { content: [{ type: "text", text: `Saved baselines (${files.length}):\n${details.join("\n")}` }] };
+        } catch (err) {
+          return { content: [{ type: "text", text: `List error: ${err.message}` }], isError: true };
+        }
+      }
+
+      // save and compare require name
+      if (!name) {
+        return { content: [{ type: "text", text: "Error: 'name' is required for save and compare modes" }], isError: true };
+      }
+      if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
+        return { content: [{ type: "text", text: "Error: name must be alphanumeric with dashes/underscores only" }], isError: true };
+      }
+
+      const baselinePath = `${baselineDir}/${name}.png`;
+
+      if (mode === "save") {
+        // Take a raw PNG screenshot (no JPEG compression — baselines should be lossless)
+        const id = randomUUID().slice(0, 8);
+        const ssPath = `/tmp/_sd_${id}.png`;
+        dockerExec(`scrot -o ${ssPath}`, 30000, cn);
+
+        if (region && region.length === 4) {
+          const [rx1, ry1, rx2, ry2] = region;
+          const [dx1, dy1] = apiToDisplay(rx1, ry1, cn);
+          const [dx2, dy2] = apiToDisplay(rx2, ry2, cn);
+          const cropW = dx2 - dx1;
+          const cropH = dy2 - dy1;
+          if (cropW <= 0 || cropH <= 0) {
+            return { content: [{ type: "text", text: "Error: region must have positive width and height" }], isError: true };
+          }
+          dockerExec(`convert ${ssPath} -crop ${cropW}x${cropH}+${dx1}+${dy1} +repage ${baselinePath} && rm -f ${ssPath}`, 30000, cn);
+        } else {
+          dockerExec(`mv ${ssPath} ${baselinePath}`, 5000, cn);
+        }
+
+        const dims = dockerExec(`identify -format '%wx%h' '${baselinePath}'`, 5000, cn).toString().trim();
+        // Return a preview of the saved baseline
+        const api = getApiDimensions(cn);
+        const useJpeg = SCREENSHOT_FORMAT === "jpeg" || SCREENSHOT_FORMAT === "jpg";
+        const previewPath = `/tmp/_sd_${id}_preview.${useJpeg ? "jpg" : "png"}`;
+        const qualityFlag = useJpeg ? `-quality ${SCREENSHOT_QUALITY}` : "";
+        dockerExec(`convert '${baselinePath}' -resize ${api.width}x${api.height}! ${qualityFlag} ${previewPath}`, 30000, cn);
+        const previewB64 = dockerExec(`base64 ${previewPath} && rm -f ${previewPath}`, 30000, cn).toString().replace(/\s/g, "");
+
+        return {
+          content: [
+            { type: "image", data: previewB64, mimeType: useJpeg ? "image/jpeg" : "image/png" },
+            { type: "text", text: `Baseline '${name}' saved (${dims})${region ? ` [region ${region.join(",")}]` : ""}` }
+          ]
+        };
+      }
+
+      if (mode === "compare") {
+        // Check baseline exists
+        try {
+          dockerExec(`test -f '${baselinePath}'`, 5000, cn);
+        } catch {
+          return { content: [{ type: "text", text: `Baseline '${name}' not found. Use mode='save' first. Available baselines: ${(() => { try { return dockerExec(`ls ${baselineDir}/*.png 2>/dev/null | xargs -I{} basename {} .png`, 5000, cn).toString().trim().split("\n").join(", ") || "none"; } catch { return "none"; } })()}` }], isError: true };
+        }
+
+        // Take current screenshot (raw PNG for accurate comparison)
+        const id = randomUUID().slice(0, 8);
+        const currentPath = `/tmp/_sd_${id}_current.png`;
+        dockerExec(`scrot -o ${currentPath}`, 30000, cn);
+
+        // Crop if region specified
+        if (region && region.length === 4) {
+          const [rx1, ry1, rx2, ry2] = region;
+          const [dx1, dy1] = apiToDisplay(rx1, ry1, cn);
+          const [dx2, dy2] = apiToDisplay(rx2, ry2, cn);
+          const cropW = dx2 - dx1;
+          const cropH = dy2 - dy1;
+          if (cropW <= 0 || cropH <= 0) {
+            return { content: [{ type: "text", text: "Error: region must have positive width and height" }], isError: true };
+          }
+          const croppedPath = `/tmp/_sd_${id}_cropped.png`;
+          dockerExec(`convert ${currentPath} -crop ${cropW}x${cropH}+${dx1}+${dy1} +repage ${croppedPath} && mv ${croppedPath} ${currentPath}`, 30000, cn);
+        }
+
+        // Ensure dimensions match (resize current to match baseline if needed)
+        const baselineDims = dockerExec(`identify -format '%wx%h' '${baselinePath}'`, 5000, cn).toString().trim();
+        const currentDims = dockerExec(`identify -format '%wx%h' '${currentPath}'`, 5000, cn).toString().trim();
+        if (baselineDims !== currentDims) {
+          dockerExec(`convert '${currentPath}' -resize ${baselineDims}! '${currentPath}'`, 30000, cn);
+        }
+
+        // Run ImageMagick compare
+        const diffPath = `/tmp/_sd_${id}_diff.png`;
+        const metricPath = `/tmp/_sd_${id}_metric.txt`;
+        const fuzzPct = fuzz || 5;
+
+        // compare returns exit code 1 if images differ (not an error), 2 on real error
+        let diffMetric = "0";
+        try {
+          // AE (Absolute Error) = pixel count, redirect metric to stderr
+          dockerExec(`compare -metric AE -fuzz ${fuzzPct}% '${baselinePath}' '${currentPath}' '${diffPath}' 2>${metricPath}`, 60000, cn);
+          diffMetric = dockerExec(`cat ${metricPath}`, 5000, cn).toString().trim();
+        } catch (err) {
+          // Exit code 1 = images differ (normal), stderr has the pixel count
+          try {
+            diffMetric = dockerExec(`cat ${metricPath}`, 5000, cn).toString().trim();
+          } catch {}
+        }
+
+        // Get total pixel count for percentage
+        const [bw, bh] = baselineDims.split("x").map(Number);
+        const totalPixels = bw * bh;
+        const diffPixels = parseInt(diffMetric) || 0;
+        const diffPct = totalPixels > 0 ? ((diffPixels / totalPixels) * 100).toFixed(2) : "0.00";
+
+        // Get bounding box of differences using compare with subimage-search or trim
+        let boundingBox = "";
+        try {
+          // Create a binary diff mask, then get the bounding box via trim
+          const maskPath = `/tmp/_sd_${id}_mask.png`;
+          try {
+            dockerExec(`compare -fuzz ${fuzzPct}% '${baselinePath}' '${currentPath}' -compose Src -highlight-color White -lowlight-color Black '${maskPath}' 2>/dev/null`, 30000, cn);
+          } catch {} // exit code 1 is expected
+          const trimInfo = dockerExec(`identify -format '%@' '${maskPath}' 2>/dev/null`, 5000, cn).toString().trim();
+          if (trimInfo && trimInfo !== "0x0+0+0") {
+            boundingBox = trimInfo; // format: WxH+X+Y
+          }
+          dockerExec(`rm -f ${maskPath}`, 5000, cn);
+        } catch {}
+
+        // Scale diff image for return
+        const api = getApiDimensions(cn);
+        const useJpeg = SCREENSHOT_FORMAT === "jpeg" || SCREENSHOT_FORMAT === "jpg";
+        const returnPath = `/tmp/_sd_${id}_return.${useJpeg ? "jpg" : "png"}`;
+        const qualityFlag = useJpeg ? `-quality ${SCREENSHOT_QUALITY}` : "";
+        dockerExec(`convert '${diffPath}' -resize ${api.width}x${api.height}! ${qualityFlag} '${returnPath}'`, 30000, cn);
+        const diffB64 = dockerExec(`base64 '${returnPath}' && rm -f ${currentPath} ${diffPath} ${metricPath} '${returnPath}'`, 30000, cn).toString().replace(/\s/g, "");
+
+        const identical = diffPixels === 0;
+        let summary = identical
+          ? `Screenshots are identical (fuzz=${fuzzPct}%)`
+          : `Differences found: ${diffPixels.toLocaleString()} pixels (${diffPct}%) differ (fuzz=${fuzzPct}%)`;
+        if (boundingBox && !identical) {
+          summary += `\nBounding box of changes: ${boundingBox}`;
+          // Convert bounding box to API coordinates
+          const bbMatch = boundingBox.match(/(\d+)x(\d+)\+(\d+)\+(\d+)/);
+          if (bbMatch) {
+            const [, bbW, bbH, bbX, bbY] = bbMatch.map(Number);
+            const scaleFactor = api.width / bw;
+            const apiX1 = Math.round(bbX * scaleFactor);
+            const apiY1 = Math.round(bbY * scaleFactor);
+            const apiX2 = Math.round((bbX + bbW) * scaleFactor);
+            const apiY2 = Math.round((bbY + bbH) * scaleFactor);
+            summary += ` → API region: [${apiX1}, ${apiY1}, ${apiX2}, ${apiY2}]`;
+          }
+        }
+        summary += `\nBaseline: ${name} (${baselineDims}), Compared: ${currentDims}`;
+
+        return {
+          content: [
+            { type: "image", data: diffB64, mimeType: useJpeg ? "image/jpeg" : "image/png" },
+            { type: "text", text: summary }
+          ]
+        };
+      }
+
+      return { content: [{ type: "text", text: `Unknown mode: ${mode}` }], isError: true };
+    } catch (err) {
+      return { content: [{ type: "text", text: `Screenshot-diff error: ${err.message}` }], isError: true };
+    }
+  }
+);
+
 // === computer_type_file — paste file contents into active window ===
 server.tool(
   "computer_type_file",
