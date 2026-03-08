@@ -5343,7 +5343,7 @@ server.tool(
   "computer_tabs",
   "Browser tab management: list, switch, close, or open tabs. Uses AT-SPI2 accessibility tree to reliably identify browser tabs by title. Active tab marked with 'selected' state. Works with Firefox (auto-detected).",
   {
-    action: z.enum(["list", "switch", "close", "new"]).describe("list=show all tabs, switch=activate a tab, close=close a tab, new=open new tab"),
+    action: z.enum(["list", "switch", "close", "close_others", "new"]).describe("list=show all tabs, switch=activate a tab, close=close a tab, close_others=close all tabs except active (or target), new=open new tab"),
     target: z.union([z.string(), z.number()]).optional().describe("Tab index (0-based) or title substring. Required for switch/close actions."),
     url: z.string().optional().describe("URL to navigate to after opening new tab (for 'new' action)"),
     include_url: z.boolean().default(false).describe("For 'list': read URLs. 'active' (default if true) reads active tab only (~500ms). 'all' reads every tab (~500ms per tab, switches back to original)."),
@@ -5526,6 +5526,10 @@ server.tool(
           await new Promise(r => setTimeout(r, 500));
         }
         xdotool("key ctrl+w", cn);
+        // Move mouse away from tab bar to prevent Firefox tooltip popups
+        const tabApi = getApiDimensions(cn);
+        const [dmx, dmy] = apiToDisplay(Math.round(tabApi.width / 2), Math.round(tabApi.height / 2), cn);
+        xdotool(`mousemove ${dmx} ${dmy}`, cn);
         await new Promise(r => setTimeout(r, SCREENSHOT_DELAY_MS));
         const ss = takeScreenshot(cn);
 
@@ -5533,6 +5537,52 @@ server.tool(
           content: [
             { type: "image", data: ss.data, mimeType: ss.mimeType },
             { type: "text", text: `Closed tab [${closedIdx}] "${closedTitle}". ${result.tabs.length - 1} tab(s) remaining.` }
+          ]
+        };
+      }
+
+      // ── CLOSE_OTHERS ──
+      if (action === "close_others") {
+        const result = getBrowserTabs();
+        if (result.error) return { content: [{ type: "text", text: result.error }], isError: true };
+
+        if (result.tabs.length <= 1) {
+          const ss = takeScreenshot(cn);
+          return { content: [{ type: "image", data: ss.data, mimeType: ss.mimeType }, { type: "text", text: "Only 1 tab open — nothing to close." }] };
+        }
+
+        // Determine which tab to keep
+        let keepIdx;
+        if (target !== undefined) {
+          const found = findTab(result.tabs, target);
+          if (found.error) return { content: [{ type: "text", text: `Error: ${found.error}` }], isError: true };
+          keepIdx = found.tab.index;
+        } else {
+          // Keep the active tab
+          const active = result.tabs.find(t => t.active);
+          keepIdx = active ? active.index : 0;
+        }
+
+        // Close all other tabs from right to left (to avoid index shift issues)
+        const toClose = result.tabs.filter(t => t.index !== keepIdx).sort((a, b) => b.index - a.index);
+        for (const tab of toClose) {
+          clickTab(tab);
+          await new Promise(r => setTimeout(r, 300));
+          xdotool("key ctrl+w", cn);
+          await new Promise(r => setTimeout(r, 300));
+        }
+
+        // Move mouse to center to avoid tooltip
+        const tabApi = getApiDimensions(cn);
+        const [dmx, dmy] = apiToDisplay(Math.round(tabApi.width / 2), Math.round(tabApi.height / 2), cn);
+        xdotool(`mousemove ${dmx} ${dmy}`, cn);
+        await new Promise(r => setTimeout(r, SCREENSHOT_DELAY_MS));
+        const ss = takeScreenshot(cn);
+
+        return {
+          content: [
+            { type: "image", data: ss.data, mimeType: ss.mimeType },
+            { type: "text", text: `Closed ${toClose.length} tab(s), kept "${result.tabs.find(t => t.index === keepIdx)?.title || "unknown"}". 1 tab remaining.` }
           ]
         };
       }
