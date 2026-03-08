@@ -1,9 +1,24 @@
 {
   "mcpServers": {
-    "computer-use-mcp": {
+    "computer-use": {
       "command": "node",
-      "args": ["index.js"],
-      "cwd": "/Users/kevinster/computer-use-mcp"
+      "args": [
+        "/Users/kevinster/computer-use-mcp/index.js"
+      ],
+      "env": {
+        "CONTAINER_NAME": "computer-use"
+      }
+    },
+    "worker-fleet": {
+      "command": "bun",
+      "args": [
+        "run",
+        "/Users/kevinster/.claude-ops/mcp/worker-fleet/index.ts"
+      ],
+      "env": {
+        "PROJECT_ROOT": "/Users/kevinster/computer-use-mcp",
+        "WORKER_NAME": "cu-chief"
+      }
     }
   }
 }

@@ -154,3 +154,19 @@ docker exec -it computer-use bash
 - **Dogfood** — you use what you build. Every bug you hit, fix.
 - **Perpetual improvement** — there's always something to make better.
 - **Hackable** — other agents should be able to use this easily.
+
+## USE IT (Non-Negotiable)
+
+**You cannot build a good tool without using it for real work.**
+
+Beyond testing actions in isolation, you must USE the computer for actual productive tasks:
+- Open Firefox and browse real websites
+- Read documentation in the browser
+- Fill out forms, navigate multi-page flows
+- Download files to /workspace
+- Use the terminal (xfce4-terminal) inside the VM
+- Open multiple windows, switch between them, resize them
+
+If using the computer feels clunky, slow, or unreliable — that IS your backlog. Fix the pain you experience. The best test suite is real usage.
+
+**Each cycle should include at least one "real task"** beyond synthetic tests — browse a URL, read a doc, accomplish something useful inside the VM. This surfaces bugs that synthetic tests miss.

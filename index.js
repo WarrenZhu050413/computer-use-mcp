@@ -17,7 +17,7 @@ function dockerExec(cmd) {
 }
 
 function takeScreenshot() {
-  dockerExec("import -window root /tmp/_screenshot.png");
+  dockerExec("scrot -o /tmp/_screenshot.png");
   const b64 = dockerExec("base64 /tmp/_screenshot.png").toString().replace(/\s/g, "");
   return b64;
 }
@@ -149,8 +149,11 @@ Every action (except screenshot, wait) returns a screenshot showing the result.`
 
         case "type": {
           if (!text) throw new Error("text required for type action");
-          const escaped = text.replace(/'/g, "'\\''");
-          dockerExec(`xdotool type --clearmodifiers --delay 12 '${escaped}'`);
+          // Write text to temp file via base64 to avoid all shell escaping issues
+          const b64Text = Buffer.from(text).toString("base64");
+          dockerExec(`echo ${b64Text} | base64 -d > /tmp/_type.txt`);
+          // Use xdotool with file input to avoid shell interpretation of special chars
+          dockerExec(`xdotool type --clearmodifiers --delay 12 --file /tmp/_type.txt`);
           break;
         }
 
@@ -174,9 +177,7 @@ Every action (except screenshot, wait) returns a screenshot showing the result.`
           xdotool(`mousemove ${x} ${y}`);
           const buttonMap = { up: 4, down: 5, left: 6, right: 7 };
           const btn = buttonMap[dir] || 5;
-          for (let i = 0; i < amount; i++) {
-            xdotool(`click ${btn}`);
-          }
+          xdotool(`click --repeat ${amount} --delay 50 ${btn}`);
           break;
         }
 
@@ -240,7 +241,7 @@ Every action (except screenshot, wait) returns a screenshot showing the result.`
           const [x1, y1, x2, y2] = region;
           const w = x2 - x1;
           const h = y2 - y1;
-          dockerExec("import -window root /tmp/_screenshot.png");
+          dockerExec("scrot -o /tmp/_screenshot.png");
           dockerExec(`convert /tmp/_screenshot.png -crop ${w}x${h}+${x1}+${y1} +repage -resize ${DISPLAY_WIDTH}x${DISPLAY_HEIGHT} /tmp/_zoom.png`);
           const b64 = dockerExec("base64 /tmp/_zoom.png").toString().replace(/\s/g, "");
           return {
