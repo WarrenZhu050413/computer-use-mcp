@@ -5565,32 +5565,31 @@ server.tool(
         const expectedClose = result.tabs.length - 1;
         const keepTitle = keepTab.title;
 
-        // Re-query tabs before each close to get fresh coordinates
-        // (tabs resize/shift after each close, making stale coords unreliable)
-        // Use same timing as the working single-tab close action (500ms after click)
+        // Keyboard-only approach: activate keep tab, then Ctrl+Tab + Ctrl+W
+        // to cycle through and close non-keep tabs. Avoids all bbox coordinate
+        // issues that cause stale-click bugs when tabs resize/shift.
+        clickTab(keepTab);
+        await new Promise(r => setTimeout(r, 500));
+
         let closed = 0;
-        const centerApi = getApiDimensions(cn);
-        const [centerDx, centerDy] = apiToDisplay(Math.round(centerApi.width / 2), Math.round(centerApi.height / 2), cn);
-        for (let attempt = 0; attempt < expectedClose + 3; attempt++) {
+        for (let attempt = 0; attempt < expectedClose + 5; attempt++) {
           const fresh = getBrowserTabs();
           if (fresh.error || fresh.tabs.length <= 1) break;
-          const prevCount = fresh.tabs.length;
-          // Find a tab that isn't the keep tab (match by title)
-          const victim = fresh.tabs.find(t => t.title !== keepTitle);
-          if (!victim) break;
-          clickTab(victim);
-          await new Promise(r => setTimeout(r, 500));
+
+          // If on keep tab, switch to next tab first
+          const activeTab = fresh.tabs.find(t => t.active);
+          if (activeTab && activeTab.title === keepTitle) {
+            xdotool("key ctrl+Tab", cn);
+            await new Promise(r => setTimeout(r, 300));
+          }
+
+          // Close current (non-keep) tab
           xdotool("key ctrl+w", cn);
-          // Move mouse to center to prevent tooltip interference on next click
-          xdotool(`mousemove ${centerDx} ${centerDy}`, cn);
           await new Promise(r => setTimeout(r, 500));
-          // Stuck detection: if tab count didn't decrease, stop
-          const check = getBrowserTabs();
-          if (!check.error && check.tabs.length >= prevCount) break;
           closed++;
         }
 
-        // Ensure keep tab is active
+        // Ensure keep tab is active (click it with fresh coords)
         const finalTabs = getBrowserTabs();
         if (!finalTabs.error && finalTabs.tabs.length > 0) {
           const keep = finalTabs.tabs.find(t => t.title === keepTitle) || finalTabs.tabs[0];
