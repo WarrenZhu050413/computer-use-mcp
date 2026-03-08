@@ -1651,6 +1651,28 @@ Improved clipboard paste terminal-vs-GUI detection to check X11 `WM_CLASS` prope
 
 **Version**: 1.28.0 | **MCP tools**: 36
 
+## Cycle 36 (2026-03-08)
+
+### Session Management Improvements
+
+1. **computer_session_list tool**: List all saved session recordings in the workspace with metadata — name, action count, duration, file size, and screenshot count per session. Totals up workspace storage. Useful for managing session recordings without shell access.
+
+2. **computer_session_compress tool**: Compress saved session recordings by removing redundant screenshots. Three modes:
+   - **deduplicate**: Remove consecutive identical screenshots (MD5 hash comparison). Keeps only the last of each identical run.
+   - **keyframes**: Keep every Nth screenshot (configurable interval, default 5). Removes intermediate frames while preserving visual timeline.
+   - **strip**: Remove ALL embedded screenshots. Maximum compression.
+   - Supports `dry_run=true` to preview changes without modifying files.
+   - Tested: 754KB session → 1.6KB after strip (99.8% reduction).
+
+3. **API spec verified**: Browsed Anthropic Computer Use docs in VM. No changes since `computer_20251124` / `text_editor_20250728`.
+
+### Verification Results
+- **sc-139**: session_list — shows 3 sessions with correct metadata (action count, duration, file size, screenshot count) ✅
+- **sc-140**: session_compress — all 3 modes tested: deduplicate (0 redundant, correct), keyframes dry_run (5→3), strip (754KB→1.6KB). Error cases handled. ✅
+- **sc-141**: dogfooding — browsed docs, opened terminal, verified tesseract 5.3.4 + disk 7%, recorded 6-action session ✅
+
+**Version**: 1.29.0 | **MCP tools**: 38
+
 ## Cycle 34 (2026-03-08)
 
 ### Inline Action Batching
