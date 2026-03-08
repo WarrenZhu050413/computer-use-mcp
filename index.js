@@ -282,6 +282,39 @@ function clickWithModifier(x, y, button, modifier, containerName = DEFAULT_CONTA
   }
 }
 
+// Clipboard paste helper — pastes text into active window via clipboard
+// Auto-detects terminal vs GUI for correct paste shortcut, restores original clipboard
+function clipboardPaste(content, containerName = DEFAULT_CONTAINER) {
+  // Save original clipboard
+  let originalClipboard = "";
+  try {
+    originalClipboard = dockerExec(`xclip -selection clipboard -o 2>/dev/null || true`, 5000, containerName).toString();
+  } catch { /* empty clipboard is fine */ }
+
+  // Set clipboard via base64 (safe for all content including special chars)
+  const b64 = Buffer.from(content).toString("base64");
+  const id = randomUUID().slice(0, 8);
+  const tmpPath = `/tmp/_cp_${id}.txt`;
+  dockerExec(`echo '${b64}' | base64 -d > '${tmpPath}' && cat '${tmpPath}' | xclip -selection clipboard -i && rm -f '${tmpPath}'`, 30000, containerName);
+
+  // Detect terminal vs GUI for correct paste shortcut
+  let isTerminal = false;
+  try {
+    const winName = dockerExec(`xdotool getactivewindow getwindowname 2>/dev/null || echo ""`, 5000, containerName).toString().trim().toLowerCase();
+    isTerminal = /terminal|xterm|rxvt|konsole|alacritty|kitty|tilix|sakura|lxterminal|terminator|urxvt/.test(winName);
+  } catch { /* default to GUI paste */ }
+
+  const pasteKey = isTerminal ? "ctrl+shift+v" : "ctrl+v";
+  xdotool(`key ${pasteKey}`, containerName);
+
+  // Restore original clipboard after brief delay
+  if (originalClipboard) {
+    const b64Orig = Buffer.from(originalClipboard).toString("base64");
+    const origPath = `/tmp/_cp_orig_${id}.txt`;
+    dockerExec(`sleep 0.3 && echo '${b64Orig}' | base64 -d > '${origPath}' && cat '${origPath}' | xclip -selection clipboard -i && rm -f '${origPath}'`, 30000, containerName);
+  }
+}
+
 // Core action executor — used by main handler and recursively by hold_key
 function executeAction({ action, coordinate, text, scroll_direction, scroll_amount,
                          start_coordinate, duration, region }, containerName = DEFAULT_CONTAINER) {
@@ -352,40 +385,12 @@ function executeAction({ action, coordinate, text, scroll_direction, scroll_amou
 
     case "type": {
       if (!text) throw new Error("text required for type action");
-      // Check if text contains non-ASCII characters (xdotool type crashes on multi-byte)
       const hasNonAscii = /[^\x00-\x7F]/.test(text);
-      if (hasNonAscii) {
-        // Clipboard paste fallback for unicode text:
-        // 1. Save original clipboard
-        // 2. Set clipboard to our text
-        // 3. Detect window type (terminal vs GUI) and paste with correct shortcut
-        // 4. Restore original clipboard
-        let originalClipboard = "";
-        try {
-          originalClipboard = dockerExec(`xclip -selection clipboard -o 2>/dev/null || true`, 5000, containerName).toString();
-        } catch { /* empty clipboard is fine */ }
-        const b64Full = Buffer.from(text).toString("base64");
-        const id = randomUUID().slice(0, 8);
-        const tmpPath = `/tmp/_type_uni_${id}.txt`;
-        dockerExec(`echo ${b64Full} | base64 -d > ${tmpPath}`, 30000, containerName);
-        dockerExec(`cat ${tmpPath} | xclip -selection clipboard -i && rm -f ${tmpPath}`, 30000, containerName);
-        // Detect if focused window is a terminal emulator (ctrl+shift+v) vs GUI app (ctrl+v)
-        // Terminal emulators intercept ctrl+v as "literal next char", so they need ctrl+shift+v
-        let isTerminal = false;
-        try {
-          const winName = dockerExec(`xdotool getactivewindow getwindowname 2>/dev/null || echo ""`, 5000, containerName).toString().trim().toLowerCase();
-          isTerminal = /terminal|xterm|rxvt|konsole|alacritty|kitty|tilix|sakura|lxterminal|terminator|urxvt/.test(winName);
-        } catch { /* default to GUI paste if detection fails */ }
-        const pasteKey = isTerminal ? "ctrl+shift+v" : "ctrl+v";
-        xdotool(`key ${pasteKey}`, containerName);
-        // Restore original clipboard after a brief delay
-        if (originalClipboard) {
-          const b64Orig = Buffer.from(originalClipboard).toString("base64");
-          const origPath = `/tmp/_type_orig_${id}.txt`;
-          dockerExec(`sleep 0.2 && echo ${b64Orig} | base64 -d > ${origPath} && cat ${origPath} | xclip -selection clipboard -i && rm -f ${origPath}`, 30000, containerName);
-        }
+      // Use clipboard paste for: non-ASCII text, or large ASCII text (>500 chars = much faster)
+      if (hasNonAscii || text.length > 500) {
+        clipboardPaste(text, containerName);
       } else {
-        // ASCII text: use xdotool type (fast, reliable for ASCII)
+        // ASCII text (short): use xdotool type (preserves modifier state)
         // Split on newlines and press Return between segments (xdotool --file drops \n)
         const lines = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
         for (let i = 0; i < lines.length; i++) {
@@ -467,7 +472,7 @@ function executeAction({ action, coordinate, text, scroll_direction, scroll_amou
 
 const server = new McpServer({
   name: "computer-use",
-  version: "1.16.0",
+  version: "1.17.0",
 });
 
 const actionSchema = {
@@ -2585,6 +2590,64 @@ Optionally auto-clicks the found text.`,
       };
     } catch (err) {
       return { content: [{ type: "text", text: `Scroll-to error: ${err.message}` }], isError: true };
+    }
+  }
+);
+
+// === computer_type_file — paste file contents into active window ===
+server.tool(
+  "computer_type_file",
+  `Type the contents of a file from the container into the active window via clipboard paste.
+Faster and more reliable than character-by-character typing for large content (code, configs, text).
+Reads the file, sets the clipboard, pastes with the correct shortcut (auto-detects terminal vs GUI), and restores the original clipboard.`,
+  {
+    path: z.string().describe("Absolute path to the file inside the container (e.g. /workspace/code.py)"),
+    line_range: z.string().optional().describe("Optional line range to type, e.g. '1-50' or '10-20'. Omit to type entire file"),
+    container_name: z.string().optional().describe("Target container (default: primary)"),
+  },
+  async ({ path: filePath, line_range, container_name }) => {
+    try {
+      const cn = resolveContainer(container_name);
+      const safePath = filePath.replace(/'/g, "'\\''");
+
+      // Check file exists
+      try {
+        dockerExec(`test -f '${safePath}'`, 5000, cn);
+      } catch {
+        return { content: [{ type: "text", text: `File not found: ${filePath}` }], isError: true };
+      }
+
+      // Read file content (optionally with line range)
+      let catCmd = `cat '${safePath}'`;
+      if (line_range) {
+        const rangeMatch = line_range.match(/^(\d+)-(\d+)$/);
+        if (!rangeMatch) {
+          return { content: [{ type: "text", text: `Invalid line_range format: ${line_range}. Use 'start-end' (e.g. '1-50')` }], isError: true };
+        }
+        catCmd = `sed -n '${rangeMatch[1]},${rangeMatch[2]}p' '${safePath}'`;
+      }
+
+      const content = dockerExec(catCmd, 30000, cn).toString();
+      if (content.length === 0) {
+        return { content: [{ type: "text", text: `File is empty${line_range ? ` (lines ${line_range})` : ""}: ${filePath}` }] };
+      }
+
+      // Paste via clipboard helper
+      clipboardPaste(content, cn);
+
+      await new Promise(r => setTimeout(r, SCREENSHOT_DELAY_MS));
+      const ss = takeScreenshot(cn);
+      const lineInfo = line_range ? ` (lines ${line_range})` : "";
+      const lineCount = content.split("\n").length;
+
+      return {
+        content: [
+          { type: "image", data: ss.data, mimeType: ss.mimeType },
+          { type: "text", text: `Typed ${content.length} chars (${lineCount} lines) from ${filePath}${lineInfo}` }
+        ]
+      };
+    } catch (err) {
+      return { content: [{ type: "text", text: `Type-file error: ${err.message}` }], isError: true };
     }
   }
 );
