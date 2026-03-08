@@ -1852,6 +1852,45 @@ Researched latest Anthropic docs (March 2026). Findings:
 ### Next Steps
 - [ ] AT-SPI accessibility tree extraction (needs Dockerfile + Python bindings)
 - [ ] Web content extraction in computer_navigate (return page text + title)
-- [ ] Resolution/device profiles (mobile, tablet, desktop_hd presets)
-- [ ] Test computer_scrape on browser page + verify clipboard restore
-- [ ] Monitor for API updates (next check in ~4 cycles)
+- [ ] Monitor for API updates (next check in ~3 cycles)
+
+---
+
+## Cycle 39 (2026-03-08)
+
+### Bug Fixes
+- **computer_scrape terminal fix**: Terminals use `ctrl+shift+a`/`ctrl+shift+c` for select-all/copy. Old code sent `ctrl+a` (readline begin-of-line) + `ctrl+c` (SIGINT) — both wrong, returned empty text. Now auto-detects terminal via `isTerminalWindow()` helper and uses correct shortcuts.
+
+### New Features
+
+#### Resolution Presets (computer_env_resize)
+- Added `preset` param with 7 device profiles:
+  - `mobile_portrait` (375x812), `mobile_landscape` (812x375)
+  - `tablet_portrait` (768x1024), `tablet_landscape` (1024x768)
+  - `laptop` (1366x768), `desktop_hd` (1920x1080), `desktop_4k` (3840x2160)
+- Custom width/height still supported, can override preset values
+- Preset name shown in response text
+
+#### isTerminalWindow() Helper
+- Extracted terminal detection from `clipboardPaste()` inline code
+- Shared by `clipboardPaste()` and `computer_scrape`
+- Detects via WM_CLASS (xfce4-terminal, gnome-terminal, xterm, etc.) + window name fallback
+
+### Real-World Dogfooding
+- Tested all 3 cycle-38 tools via MCP: inspect (all/at modes), scrape (Firefox full page), notify
+- Scraped full HN front page (30 stories) via computer_scrape — text accurate
+- Discovered terminal scrape bug through actual usage — fixed same cycle
+- Desktop notification rendered correctly in top-right corner
+
+### Commits
+1. `96a9942` — feat: fix terminal scrape, add resolution presets, extract isTerminalWindow helper
+
+### Code Stats
+- MCP server: ~4773 lines (up from ~4730)
+- 41 MCP tools (unchanged)
+- Server version: 1.32.0
+
+### Next Steps
+- [ ] AT-SPI accessibility tree extraction (needs Dockerfile + Python bindings)
+- [ ] Web content extraction in computer_navigate (return page text + title)
+- [ ] Monitor for API updates (next check in ~3 cycles)
