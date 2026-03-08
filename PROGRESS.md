@@ -1128,7 +1128,60 @@ Significant OCR accuracy improvement for text on colored/dark backgrounds.
 - Server version: 1.16.0
 
 ### Next Steps
-- [ ] `computer_type_file` — type large content via file (bypass xdotool limits)
+- [x] `computer_type_file` — type large content via file (done in cycle 23)
 - [ ] Edge case testing: large files, special filenames, symlinks
 - [ ] Session replay with screenshot comparison
 - [ ] `computer_window_tile` gap testing + cascade layout verification
+
+## Cycle 23 (2026-03-08)
+
+### New Features
+
+#### 1. `computer_type_file` — Type File Contents Into Active Window
+- Reads a file from the container and pastes into the active window via clipboard
+- Optional `line_range` parameter (e.g. '1-50') to type specific lines
+- Auto-detects terminal vs GUI for correct paste shortcut (ctrl+shift+v vs ctrl+v)
+- Saves and restores original clipboard contents
+- Much faster than character-by-character typing for large content
+
+#### 2. `clipboardPaste()` DRY Helper
+- Extracted clipboard paste logic into shared `clipboardPaste(content, containerName)` function
+- Used by 3 callers: unicode type, large ASCII type, and type_file tool
+- Eliminates ~30 lines of duplicated code across the codebase
+- Handles: save clipboard → base64 encode → set clipboard → detect paste shortcut → paste → restore
+
+#### 3. Large ASCII Text Optimization
+- `type` action now uses clipboard paste for ASCII text >500 characters
+- Previously: character-by-character xdotool typing with 12ms delay per char (~6s for 500 chars)
+- Now: instant clipboard paste for large text blocks
+- Short ASCII text (<500 chars) still uses xdotool type for compatibility
+
+### Real-World Dogfooding
+- Wrote fibonacci.py (792 bytes, 26 lines) to /workspace via file_write
+- Used `type_file` to paste entire script into Mousepad — instant, all indentation preserved
+- Used `type_file` with line_range '7-15' to paste just the fibonacci function — correct extraction
+- Typed 830-char Lorem ipsum via `type` action — clipboard paste optimization kicked in
+- Ran fibonacci.py in terminal: correct output (F(0)=0 through F(14)=377, cache info)
+- Browsed Hacker News in Firefox, clicked through to arXiv paper (SWE-CI)
+
+### Verification Results
+- **sc-87**: ✅ 30 MCP tools loaded after hot restart (+1 new)
+- **sc-88**: ✅ `type_file`: 792 chars from fibonacci.py pasted into Mousepad perfectly
+- **sc-89**: ✅ Large ASCII optimization: ~830 chars pasted instantly via clipboard
+- **sc-90**: ✅ `type_file` line_range: 243 chars (lines 7-15) extracted correctly
+- **sc-91**: ✅ Real-world workflow: write → type_file → run → browse HN → arXiv
+
+### Commits
+1. `823f0b1` — feat: type-file tool + clipboardPaste DRY helper + large-text optimization (v1.17.0)
+
+### Code Stats
+- MCP server: ~2656 lines (up from ~2593)
+- 30 MCP tools (up from 29)
+- Server version: 1.17.0
+
+### Next Steps
+- [ ] Edge case testing: large files, special filenames, symlinks
+- [ ] Session replay with screenshot comparison
+- [ ] `computer_window_tile` gap testing + cascade layout verification
+- [ ] Terminal detection improvements (more shell/emulator patterns)
+- [ ] Clipboard paste verification (ensure content actually arrived)
