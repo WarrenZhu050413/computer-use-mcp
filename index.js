@@ -168,14 +168,17 @@ function restartContainer(containerName = DEFAULT_CONTAINER, reason = "unknown")
     try { execFileSync("docker", ["rm", "-f", containerName], { timeout: 10000 }); } catch {}
     const envW = env.width || DISPLAY_WIDTH;
     const envH = env.height || DISPLAY_HEIGHT;
-    execFileSync("docker", [
+    const restartArgs = [
       "run", "-d", "--name", containerName,
       "-e", `SCREEN_RESOLUTION=${envW}x${envH}`,
       "-p", `${env.vncPort}:5900`,
       "-p", `${env.novncPort}:6080`,
       "-v", `${env.workspace}:/workspace`,
-      env.image
-    ], { timeout: 30000 });
+    ];
+    if (env.memory_mb) restartArgs.push("--memory", `${env.memory_mb}m`);
+    if (env.cpus) restartArgs.push("--cpus", `${env.cpus}`);
+    restartArgs.push(env.image);
+    execFileSync("docker", restartArgs, { timeout: 30000 });
     // Wait for display to come up
     const dn = env.displayNumber || DEFAULT_DISPLAY_NUMBER;
     for (let i = 0; i < 15; i++) {
@@ -1010,8 +1013,10 @@ server.tool(
     image: z.string().optional().describe(`Docker image to use (default: ${DEFAULT_IMAGE})`),
     width: z.number().optional().describe("Display width in pixels (default: 1024)"),
     height: z.number().optional().describe("Display height in pixels (default: 768)"),
+    memory_mb: z.number().optional().describe("Memory limit in MB (e.g. 512, 1024, 2048). No limit if omitted"),
+    cpus: z.number().optional().describe("CPU limit (e.g. 0.5, 1, 2). No limit if omitted"),
   },
-  async ({ name, image, width, height }) => {
+  async ({ name, image, width, height, memory_mb, cpus }) => {
     const envName = name || `env-${randomUUID().slice(0, 6)}`;
     if (environments.has(envName)) {
       return {
@@ -1032,17 +1037,20 @@ server.tool(
     try { mkdirSync(workspace, { recursive: true }); } catch {}
 
     // Register before starting so restartContainer can find the config
-    environments.set(envName, { image: envImage, vncPort, novncPort, workspace, width: envWidth, height: envHeight, displayNumber: DEFAULT_DISPLAY_NUMBER });
+    environments.set(envName, { image: envImage, vncPort, novncPort, workspace, width: envWidth, height: envHeight, displayNumber: DEFAULT_DISPLAY_NUMBER, memory_mb, cpus });
 
     try {
-      execFileSync("docker", [
+      const dockerArgs = [
         "run", "-d", "--name", envName,
         "-e", `SCREEN_RESOLUTION=${envWidth}x${envHeight}`,
         "-p", `${vncPort}:5900`,
         "-p", `${novncPort}:6080`,
         "-v", `${workspace}:/workspace`,
-        envImage
-      ], { timeout: 30000 });
+      ];
+      if (memory_mb) dockerArgs.push("--memory", `${memory_mb}m`);
+      if (cpus) dockerArgs.push("--cpus", `${cpus}`);
+      dockerArgs.push(envImage);
+      execFileSync("docker", dockerArgs, { timeout: 30000 });
 
       // Wait for display readiness
       const envDn = environments.get(envName)?.displayNumber || DEFAULT_DISPLAY_NUMBER;
@@ -1060,6 +1068,7 @@ server.tool(
 
       const cApi = getApiDimensions(envName);
       const resInfo = cApi.width !== envWidth ? `${envWidth}x${envHeight} (API: ${cApi.width}x${cApi.height})` : `${envWidth}x${envHeight}`;
+      const limitsInfo = (memory_mb || cpus) ? `\nLimits: ${memory_mb ? memory_mb + 'MB RAM' : ''}${memory_mb && cpus ? ', ' : ''}${cpus ? cpus + ' CPUs' : ''}` : '';
       return {
         content: [{ type: "text", text:
           `Environment created: ${envName}\n` +
@@ -1068,7 +1077,7 @@ server.tool(
           `VNC port: ${vncPort}\n` +
           `noVNC port: ${novncPort}\n` +
           `noVNC URL: http://localhost:${novncPort}/vnc.html\n` +
-          `Workspace: ${workspace}\n` +
+          `Workspace: ${workspace}${limitsInfo}\n` +
           `Display: ${ready ? "active" : "starting (may need a few more seconds)"}\n\n` +
           `Use container_name="${envName}" in computer/computer_bash/computer_status to interact with this environment.`
         }]
@@ -1824,9 +1833,10 @@ server.tool(
         const lRes = env.width ? `${env.width}x${env.height}` : `${DISPLAY_WIDTH}x${DISPLAY_HEIGHT}`;
         const lApiRes = `${lApi.width}x${lApi.height}`;
         const lResInfo = lRes !== lApiRes ? `${lRes} (API:${lApiRes})` : lRes;
+        const limStr = (env.memory_mb || env.cpus) ? `  limits:${env.memory_mb ? env.memory_mb + 'MB' : ''}${env.memory_mb && env.cpus ? '/' : ''}${env.cpus ? env.cpus + 'cpu' : ''}` : '';
         results.push(
           `${name}${name === DEFAULT_CONTAINER ? " (default)" : ""}: ${status}` +
-          `  ${lResInfo}  VNC:${env.vncPort}  noVNC:${env.novncPort}  workspace:${env.workspace}`
+          `  ${lResInfo}  VNC:${env.vncPort}  noVNC:${env.novncPort}  workspace:${env.workspace}${limStr}`
         );
       }
       return {
@@ -4270,16 +4280,18 @@ Note: snapshots do NOT preserve running processes — after restore, desktop ser
         // docker commit captures /tmp/.X*-lock which prevents Xvfb from starting
         const envW = env.width || DISPLAY_WIDTH;
         const envH = env.height || DISPLAY_HEIGHT;
-        execFileSync("docker", [
+        const snapArgs = [
           "run", "-d", "--name", cn,
           "--entrypoint", "/bin/bash",
           "-e", `SCREEN_RESOLUTION=${envW}x${envH}`,
           "-p", `${env.vncPort}:5900`,
           "-p", `${env.novncPort}:6080`,
           "-v", `${env.workspace}:/workspace`,
-          imageRef,
-          "-c", "rm -f /tmp/.X*-lock /tmp/.X11-unix/X* && exec /start.sh"
-        ], { timeout: 30000 });
+        ];
+        if (env.memory_mb) snapArgs.push("--memory", `${env.memory_mb}m`);
+        if (env.cpus) snapArgs.push("--cpus", `${env.cpus}`);
+        snapArgs.push(imageRef, "-c", "rm -f /tmp/.X*-lock /tmp/.X11-unix/X* && exec /start.sh");
+        execFileSync("docker", snapArgs, { timeout: 30000 });
 
         // Wait for display readiness
         const dn = env.displayNumber || DEFAULT_DISPLAY_NUMBER;
