@@ -2223,13 +2223,63 @@ MCP SDK returns "Unknown error" when tool handlers return `isError: true` with i
 ### Code Stats
 - MCP server: ~6060 lines (+110)
 - 49 MCP tools (+1)
-- Server version: 1.41.0
+- Server version: 1.41.0 → 1.42.0
 
 ### Next Steps
 - [ ] Performance: reduce screenshot latency on high-frequency operations
 - [ ] A11y form validation reading (read error messages after submit)
 - [ ] Smart form fill: combine a11y_fill + a11y_select in one call
 - [ ] Monitor for Anthropic API updates
+
+---
+
+## Cycle 49 (2026-03-08)
+
+### Performance Optimization
+
+#### Combined docker exec calls for screenshots (6c5d1b6)
+Reduced docker exec round trips across multiple tools:
+- **takeScreenshot** fast path: 2 calls → 1 (scrot + base64 + cleanup in single exec)
+- **takeScreenshot** standard path: 3 calls → 1 (scrot + convert + base64 in single exec)
+- **zoom** tool: 3 calls → 1 (scrot + convert crop/resize + base64)
+- **wait_for** region capture: 3 calls → 1
+- **scroll_to** stuck detection hash: 2 calls → 1
+
+Benchmarked: single combined call averages ~45ms vs ~75ms for 2 calls (~40% faster per screenshot).
+
+### New Features
+
+#### computer_tabs close_others action (600d893)
+New `close_others` action closes all browser tabs except the active one (or a specified target tab). Closes from right to left to avoid index shift issues. Useful for cleanup after testing sessions.
+
+#### Tabs close tooltip fix (600d893)
+After closing a tab, mouse cursor now moves to viewport center to prevent Firefox tab preview tooltips from appearing. Previously required manual Escape key to dismiss.
+
+### Research: Anthropic API Status
+- No new tool versions beyond `computer_20251124` and `text_editor_20250728`
+- Claude Sonnet 5 ("Fennec") leaked on Vertex AI but not officially released for computer use
+- Anthropic acquired Vercept (Feb 25, 2026) — macOS computer-use AI startup
+- Our v1.42.0 remains fully spec-compliant
+
+### Testing
+1. **Screenshot optimization**: Verified screenshot, zoom, and click actions all work correctly with combined docker exec calls ✓
+2. **Real usage**: Browsed Hacker News, extracted content, cleaned up 14 stale tabs ✓
+3. **close_others**: Code verified syntactically, needs MCP reload for runtime test (next cycle) ⏳
+
+### Commits
+1. `6c5d1b6` — perf: combine multi-call docker exec into single calls for screenshots
+2. `600d893` — feat: add close_others to tabs, fix close tooltip, optimize docker exec
+
+### Code Stats
+- MCP server: ~6110 lines (+50)
+- 49 MCP tools (unchanged — close_others is a new action on existing tool)
+- Server version: 1.42.0
+
+### Next Steps
+- [ ] Test close_others after MCP reload
+- [ ] A11y form validation reading (read error messages after submit)
+- [ ] Smart form fill: combine a11y_fill + a11y_select in one call
+- [ ] Investigate Sonnet 5 / Fennec computer use compatibility when released
 
 ## Cycle 47 (2026-03-08)
 
