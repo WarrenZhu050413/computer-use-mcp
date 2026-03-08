@@ -1027,7 +1027,58 @@ Significant OCR accuracy improvement for text on colored/dark backgrounds.
 - Server version: 1.14.0
 
 ### Next Steps
+- [x] `computer_window_move` / `computer_window_resize` — window manipulation ✅ (cycle 21)
 - [ ] `computer_type_file` — type large content via file (bypass xdotool limits)
 - [ ] Edge case testing: large files, special filenames, symlinks
 - [ ] Session replay with screenshot comparison
-- [ ] `computer_window_move` / `computer_window_resize` — window manipulation
+
+## Cycle 21 (2026-03-08)
+
+### New Features
+
+#### 1. `computer_window_move` — Window Positioning
+- Move any window to specific x,y coordinates in API space
+- Auto-scales for high-res displays (>1568px)
+- Supports title substring match or exact window ID
+- Returns screenshot + confirmation of new position
+
+#### 2. `computer_window_resize` — Window Resizing
+- Resize any window to specific width x height in API space
+- Auto-scales for high-res displays
+- Supports title substring match or exact window ID
+- Returns screenshot + confirmation of new dimensions
+
+#### 3. `computer_window_manage` — Window State Management
+- 5 actions: minimize, maximize, restore, close, raise
+- minimize: `xdotool windowminimize` (hides window)
+- maximize: activate + move to 0,0 + resize to screen dimensions
+- restore: activate + resize to 60%x70% + reposition
+- close: `xdotool windowclose` (destroys window)
+- raise: `xdotool windowraise` (bring to front without focusing)
+- All actions support title or window_id targeting
+
+### Real-World Dogfooding
+- Created side-by-side split-screen layout: Mousepad (left half) + Terminal (right half)
+- Full workflow: open terminal → close extra windows → resize both to 512x741 → position at x=0 and x=512
+- Tested all 5 manage actions: close (removed 3 extra terminals), minimize (hid terminal), maximize (Mousepad filled screen), restore, raise
+
+### Verification Results
+- **sc-77**: ✅ 28 MCP tools loaded after hot restart (+3 new)
+- **sc-78**: ✅ `window_move` moved terminal to [50,50], confirmed via xdotool geometry
+- **sc-79**: ✅ `window_resize` resized terminal 397x293 → 600x400, visually confirmed
+- **sc-80**: ✅ `window_manage` minimize/maximize/close all working
+- **sc-81**: ✅ Side-by-side split layout achieved programmatically
+
+### Commits
+1. `e518de2` — feat: window move, resize, and manage tools (v1.15.0)
+
+### Code Stats
+- MCP server: ~2503 lines (up from ~2303)
+- 28 MCP tools (up from 27)
+- Server version: 1.15.0
+
+### Next Steps
+- [ ] `computer_type_file` — type large content via file (bypass xdotool limits)
+- [ ] Edge case testing: large files, special filenames, symlinks
+- [ ] Session replay with screenshot comparison
+- [ ] Tiling layout helper (auto split-screen arrangements)
