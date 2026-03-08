@@ -523,7 +523,7 @@ function executeAction({ action, coordinate, text, scroll_direction, scroll_amou
 
 const server = new McpServer({
   name: "computer-use",
-  version: "1.28.0",
+  version: "1.29.0",
 });
 
 const actionSchema = {
@@ -2206,6 +2206,189 @@ server.tool(
     };
     } catch (err) {
       return { content: [{ type: "text", text: `Session replay error: ${err.message}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  "computer_session_list",
+  "List saved session recordings in the workspace. Shows name, action count, duration, file size, and screenshot count for each session.",
+  {
+    container_name: z.string().optional().describe("Container whose workspace to search (default: primary)"),
+  },
+  async ({ container_name }) => {
+    try {
+      const cn = resolveContainer(container_name);
+      const env = environments.get(cn);
+      const workspace = env?.workspace || DEFAULT_WORKSPACE;
+      const sessionsDir = `${workspace}/sessions`;
+
+      let files;
+      try {
+        files = readdirSync(sessionsDir).filter(f => f.endsWith(".json")).sort();
+      } catch {
+        return { content: [{ type: "text", text: `No sessions directory found at ${sessionsDir}` }] };
+      }
+
+      if (files.length === 0) {
+        return { content: [{ type: "text", text: "No saved sessions found" }] };
+      }
+
+      const rows = [];
+      let totalSize = 0;
+      for (const file of files) {
+        const filePath = `${sessionsDir}/${file}`;
+        try {
+          const raw = readFileSync(filePath, "utf-8");
+          const size = Buffer.byteLength(raw, "utf-8");
+          totalSize += size;
+          const data = JSON.parse(raw);
+          const screenshotCount = (data.actions || []).filter(a => a.screenshot).length;
+          const sizeStr = size < 1024 ? `${size}B` : size < 1048576 ? `${(size / 1024).toFixed(1)}KB` : `${(size / 1048576).toFixed(1)}MB`;
+          rows.push(
+            `  ${file.replace(".json", "")}` +
+            `  | ${data.action_count || (data.actions || []).length} actions` +
+            `  | ${Math.round((data.duration_ms || 0) / 1000)}s` +
+            `  | ${sizeStr}` +
+            (screenshotCount > 0 ? `  | ${screenshotCount} screenshots` : "")
+          );
+        } catch (err) {
+          rows.push(`  ${file.replace(".json", "")}  | error: ${err.message}`);
+        }
+      }
+
+      const totalStr = totalSize < 1024 ? `${totalSize}B` : totalSize < 1048576 ? `${(totalSize / 1024).toFixed(1)}KB` : `${(totalSize / 1048576).toFixed(1)}MB`;
+      return {
+        content: [{ type: "text", text:
+          `Sessions (${files.length}, total ${totalStr}):\n${rows.join("\n")}`
+        }]
+      };
+    } catch (err) {
+      return { content: [{ type: "text", text: `Session list error: ${err.message}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  "computer_session_compress",
+  `Compress a saved session recording by removing redundant screenshots. Three modes:
+- "deduplicate": Remove consecutive identical screenshots (MD5 match). Keeps only the last of each identical run.
+- "keyframes": Keep every Nth screenshot (set interval). Removes intermediate frames.
+- "strip": Remove ALL screenshots from the session.
+Returns before/after file size and number of screenshots removed.`,
+  {
+    name: z.string().describe("Session name to compress"),
+    mode: z.enum(["deduplicate", "keyframes", "strip"]).default("deduplicate").describe("Compression mode (default: deduplicate)"),
+    interval: z.number().min(2).max(100).optional().describe("For keyframes mode: keep every Nth screenshot (default: 5)"),
+    dry_run: z.boolean().optional().describe("If true, report what would change without modifying the file"),
+    container_name: z.string().optional().describe("Container whose workspace to search (default: primary)"),
+  },
+  async ({ name, mode, interval, dry_run, container_name }) => {
+    try {
+      const cn = resolveContainer(container_name);
+      const env = environments.get(cn);
+      const workspace = env?.workspace || DEFAULT_WORKSPACE;
+      const sessionPath = `${workspace}/sessions/${name}.json`;
+
+      if (!existsSync(sessionPath)) {
+        // Try as absolute path
+        if (!existsSync(name)) {
+          return { content: [{ type: "text", text: `Session '${name}' not found at ${sessionPath}` }], isError: true };
+        }
+      }
+      const actualPath = existsSync(sessionPath) ? sessionPath : name;
+      const raw = readFileSync(actualPath, "utf-8");
+      const sizeBefore = Buffer.byteLength(raw, "utf-8");
+      const sessionData = JSON.parse(raw);
+      const actions = sessionData.actions || [];
+
+      // Count screenshots before
+      const screenshotsBefore = actions.filter(a => a.screenshot).length;
+      if (screenshotsBefore === 0) {
+        return { content: [{ type: "text", text: `Session '${name}' has no screenshots to compress (${actions.length} actions)` }] };
+      }
+
+      let removed = 0;
+
+      if (mode === "strip") {
+        // Remove ALL screenshots
+        for (const a of actions) {
+          if (a.screenshot) {
+            delete a.screenshot;
+            removed++;
+          }
+        }
+      } else if (mode === "deduplicate") {
+        // Remove consecutive identical screenshots (MD5 match)
+        let prevHash = null;
+        for (let i = 0; i < actions.length; i++) {
+          if (!actions[i].screenshot) {
+            prevHash = null; // reset on non-screenshot action gap
+            continue;
+          }
+          const hash = createHash("md5").update(actions[i].screenshot.data).digest("hex");
+          if (hash === prevHash) {
+            delete actions[i].screenshot;
+            removed++;
+          }
+          prevHash = hash;
+        }
+      } else if (mode === "keyframes") {
+        // Keep every Nth screenshot, remove the rest
+        const keyInterval = interval || 5;
+        let ssIndex = 0;
+        for (let i = 0; i < actions.length; i++) {
+          if (!actions[i].screenshot) continue;
+          ssIndex++;
+          // Keep first, last, and every Nth
+          const isFirst = ssIndex === 1;
+          const isLast = i === actions.length - 1 || actions.slice(i + 1).every(a => !a.screenshot);
+          const isKeyframe = (ssIndex - 1) % keyInterval === 0;
+          if (!isFirst && !isLast && !isKeyframe) {
+            delete actions[i].screenshot;
+            removed++;
+          }
+        }
+      }
+
+      const screenshotsAfter = screenshotsBefore - removed;
+
+      if (!dry_run && removed > 0) {
+        sessionData.actions = actions;
+        sessionData.compressed = {
+          mode,
+          screenshots_removed: removed,
+          compressed_at: new Date().toISOString(),
+        };
+        const newRaw = JSON.stringify(sessionData, null, 2);
+        writeFileSync(actualPath, newRaw);
+        const sizeAfter = Buffer.byteLength(newRaw, "utf-8");
+        const reduction = ((1 - sizeAfter / sizeBefore) * 100).toFixed(1);
+        const sizeBeforeStr = sizeBefore < 1048576 ? `${(sizeBefore / 1024).toFixed(1)}KB` : `${(sizeBefore / 1048576).toFixed(1)}MB`;
+        const sizeAfterStr = sizeAfter < 1048576 ? `${(sizeAfter / 1024).toFixed(1)}KB` : `${(sizeAfter / 1048576).toFixed(1)}MB`;
+
+        return {
+          content: [{ type: "text", text:
+            `Compressed session '${name}' (${mode})\n` +
+            `Screenshots: ${screenshotsBefore} → ${screenshotsAfter} (removed ${removed})\n` +
+            `File size: ${sizeBeforeStr} → ${sizeAfterStr} (${reduction}% reduction)`
+          }]
+        };
+      }
+
+      // Dry run or nothing to do
+      if (removed === 0) {
+        return { content: [{ type: "text", text: `No redundant screenshots found in session '${name}' (${screenshotsBefore} unique screenshots)` }] };
+      }
+
+      return {
+        content: [{ type: "text", text:
+          `[DRY RUN] Would compress session '${name}' (${mode})\n` +
+          `Screenshots: ${screenshotsBefore} → ${screenshotsAfter} (would remove ${removed})`
+        }]
+      };
+    } catch (err) {
+      return { content: [{ type: "text", text: `Session compress error: ${err.message}` }], isError: true };
     }
   }
 );
