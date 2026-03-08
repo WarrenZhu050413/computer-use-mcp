@@ -9,26 +9,75 @@ const CONTAINER = process.env.CONTAINER_NAME || "computer-use";
 const DISPLAY_WIDTH = parseInt(process.env.DISPLAY_WIDTH || "1024", 10);
 const DISPLAY_HEIGHT = parseInt(process.env.DISPLAY_HEIGHT || "768", 10);
 const SCREENSHOT_DELAY_MS = parseInt(process.env.SCREENSHOT_DELAY_MS || "1000", 10);
+const SCREENSHOT_FORMAT = (process.env.SCREENSHOT_FORMAT || "jpeg").toLowerCase();
+const SCREENSHOT_QUALITY = parseInt(process.env.SCREENSHOT_QUALITY || "80", 10);
 const TYPING_GROUP_SIZE = 50;
 const TYPING_DELAY_MS = 12;
 const MAX_RESPONSE_LEN = 16000;
+
+function isContainerRunning() {
+  try {
+    const status = execFileSync("docker", [
+      "inspect", "--format={{.State.Status}}", CONTAINER
+    ], { timeout: 5000 }).toString().trim();
+    return status === "running";
+  } catch { return false; }
+}
+
+function restartContainer() {
+  try {
+    execFileSync("docker", ["start", CONTAINER], { timeout: 30000 });
+    // Wait for display to come up
+    for (let i = 0; i < 10; i++) {
+      try {
+        execFileSync("docker", [
+          "exec", CONTAINER, "bash", "-c", "DISPLAY=:1 xdotool getdisplaygeometry"
+        ], { timeout: 5000 });
+        return true;
+      } catch { /* display not ready yet */ }
+      execFileSync("sleep", ["1"]);
+    }
+  } catch { /* restart failed */ }
+  return false;
+}
 
 function dockerExec(cmd, timeoutMs = 30000) {
   // Use execFileSync with arg array to avoid host shell interpretation.
   // The command is passed directly to bash -c inside the container,
   // so pipes, redirects, $vars etc. work inside container but aren't
   // mangled by the host shell.
-  return execFileSync("docker", [
-    "exec", CONTAINER, "bash", "-c", `DISPLAY=:1 ${cmd}`
-  ], { timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 });
+  try {
+    return execFileSync("docker", [
+      "exec", CONTAINER, "bash", "-c", `DISPLAY=:1 ${cmd}`
+    ], { timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 });
+  } catch (err) {
+    // If container is down, attempt auto-recovery (single retry)
+    if (!isContainerRunning()) {
+      if (restartContainer()) {
+        return execFileSync("docker", [
+          "exec", CONTAINER, "bash", "-c", `DISPLAY=:1 ${cmd}`
+        ], { timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 });
+      }
+      throw new Error(`Container '${CONTAINER}' is not running and auto-restart failed. Original: ${err.message}`);
+    }
+    throw err;
+  }
 }
 
 function takeScreenshot() {
   const id = randomUUID().slice(0, 8);
-  const path = `/tmp/_ss_${id}.png`;
-  dockerExec(`scrot -o ${path}`);
-  const b64 = dockerExec(`base64 ${path} && rm -f ${path}`).toString().replace(/\s/g, "");
-  return b64;
+  const pngPath = `/tmp/_ss_${id}.png`;
+  dockerExec(`scrot -o ${pngPath}`);
+
+  if (SCREENSHOT_FORMAT === "jpeg" || SCREENSHOT_FORMAT === "jpg") {
+    const jpgPath = `/tmp/_ss_${id}.jpg`;
+    dockerExec(`convert ${pngPath} -quality ${SCREENSHOT_QUALITY} ${jpgPath}`);
+    const b64 = dockerExec(`base64 ${jpgPath} && rm -f ${pngPath} ${jpgPath}`).toString().replace(/\s/g, "");
+    return { data: b64, mimeType: "image/jpeg" };
+  }
+
+  const b64 = dockerExec(`base64 ${pngPath} && rm -f ${pngPath}`).toString().replace(/\s/g, "");
+  return { data: b64, mimeType: "image/png" };
 }
 
 function xdotool(args) {
@@ -270,11 +319,11 @@ hold_key: holds a key and executes a nested action (via hold_key_action param), 
     try {
       switch (action) {
         case "screenshot": {
-          const b64 = takeScreenshot();
+          const ss = takeScreenshot();
           return {
             content: [
-              { type: "image", data: b64, mimeType: "image/png" },
-              { type: "text", text: `Screenshot captured (${DISPLAY_WIDTH}x${DISPLAY_HEIGHT})` }
+              { type: "image", data: ss.data, mimeType: ss.mimeType },
+              { type: "text", text: `Screenshot captured (${DISPLAY_WIDTH}x${DISPLAY_HEIGHT}, ${ss.mimeType})` }
             ]
           };
         }
@@ -320,10 +369,10 @@ hold_key: holds a key and executes a nested action (via hold_key_action param), 
           if (!duration) throw new Error("duration required for wait action");
           if (duration <= 0 || duration > 100) throw new Error("duration must be between 0 and 100 seconds");
           await new Promise(r => setTimeout(r, duration * 1000));
-          const b64 = takeScreenshot();
+          const ss = takeScreenshot();
           return {
             content: [
-              { type: "image", data: b64, mimeType: "image/png" },
+              { type: "image", data: ss.data, mimeType: ss.mimeType },
               { type: "text", text: `Waited ${duration} seconds` }
             ]
           };
@@ -337,13 +386,17 @@ hold_key: holds a key and executes a nested action (via hold_key_action param), 
           if (w <= 0 || h <= 0) throw new Error("zoom region must have positive width and height");
           const id = randomUUID().slice(0, 8);
           const ssPath = `/tmp/_ss_${id}.png`;
-          const zoomPath = `/tmp/_zoom_${id}.png`;
+          const useJpeg = SCREENSHOT_FORMAT === "jpeg" || SCREENSHOT_FORMAT === "jpg";
+          const outExt = useJpeg ? "jpg" : "png";
+          const zoomPath = `/tmp/_zoom_${id}.${outExt}`;
           dockerExec(`scrot -o ${ssPath}`);
-          dockerExec(`convert ${ssPath} -crop ${w}x${h}+${x1}+${y1} +repage -resize ${DISPLAY_WIDTH}x${DISPLAY_HEIGHT} ${zoomPath}`);
+          const qualityFlag = useJpeg ? `-quality ${SCREENSHOT_QUALITY}` : "";
+          dockerExec(`convert ${ssPath} -crop ${w}x${h}+${x1}+${y1} +repage -resize ${DISPLAY_WIDTH}x${DISPLAY_HEIGHT} ${qualityFlag} ${zoomPath}`);
           const b64 = dockerExec(`base64 ${zoomPath} && rm -f ${ssPath} ${zoomPath}`).toString().replace(/\s/g, "");
+          const zoomMime = useJpeg ? "image/jpeg" : "image/png";
           return {
             content: [
-              { type: "image", data: b64, mimeType: "image/png" },
+              { type: "image", data: b64, mimeType: zoomMime },
               { type: "text", text: `Zoomed into region [${x1},${y1},${x2},${y2}]` }
             ]
           };
@@ -366,20 +419,20 @@ hold_key: holds a key and executes a nested action (via hold_key_action param), 
 
       // For all non-screenshot/wait/zoom/cursor_position actions, capture follow-up screenshot
       await new Promise(r => setTimeout(r, SCREENSHOT_DELAY_MS));
-      const b64 = takeScreenshot();
+      const ss = takeScreenshot();
       return {
         content: [
-          { type: "image", data: b64, mimeType: "image/png" },
+          { type: "image", data: ss.data, mimeType: ss.mimeType },
           { type: "text", text: `Action '${action}' completed successfully` }
         ]
       };
 
     } catch (err) {
       try {
-        const b64 = takeScreenshot();
+        const ss = takeScreenshot();
         return {
           content: [
-            { type: "image", data: b64, mimeType: "image/png" },
+            { type: "image", data: ss.data, mimeType: ss.mimeType },
             { type: "text", text: `Error during '${action}': ${err.message}` }
           ],
           isError: true
