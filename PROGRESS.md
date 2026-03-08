@@ -1271,8 +1271,58 @@ Browsed Anthropic Computer Use docs (platform.claude.com) inside the VM:
 - Server version: 1.18.1
 
 ### Next Steps
-- [ ] Session replay with screenshot comparison
+- [x] ~~Screenshot diff tool~~ → done in cycle 26
 - [ ] `computer_window_tile` gap testing + cascade layout verification
 - [ ] Terminal detection improvements (more shell/emulator patterns)
 - [ ] Clipboard paste verification (ensure content actually arrived)
-- [ ] Apply early-validation pattern to other tools that throw errors
+- [ ] `computer_macro` tool (record + replay named action sequences)
+
+## Cycle 26 (2026-03-08)
+
+### New Tool: `computer_screenshot_diff`
+
+Visual regression testing tool with 3 modes:
+
+#### Save Mode
+- Captures current screenshot as a named PNG baseline in `/workspace/.baselines/`
+- Baselines stored as lossless PNG (no JPEG compression artifacts)
+- Supports region cropping via `[x1, y1, x2, y2]` API coordinates
+- Returns preview image of saved baseline
+
+#### Compare Mode
+- Compares current screenshot to a saved baseline using ImageMagick `compare`
+- Returns visual diff image (red highlights on changed pixels)
+- Reports: pixel count, percentage of change, bounding box of changes
+- Bounding box converted to API coordinates for programmatic use
+- `fuzz` parameter (0-100%) controls color difference threshold (default 5%)
+- Auto-resizes if baseline and current dimensions differ
+
+#### List Mode
+- Lists all saved baselines with dimensions, file size, and timestamps
+
+### Verification Results
+- **Save**: Full-screen (1024x768) and region (500x290 crop) baselines saved correctly
+- **Compare — with changes**: Navigated from terminal to example.com → 52.53% diff (413,079 pixels), bounding box covers entire screen
+- **Compare — identical**: Immediate re-compare shows 0% diff (fuzz absorbs clock changes)
+- **List**: Shows all baselines with metadata
+
+### Real-World Dogfooding
+- Saved baseline of terminal state → typed command → compared: 0.77% diff with precise bounding box
+- Saved baseline → navigated Firefox to example.com → compared: 52.53% diff, massive visual change detected
+- Tested region-based save (terminal area only)
+- Verified identical comparison returns 0% diff
+
+### Commits
+1. `7b2c448` — feat: add computer_screenshot_diff tool for visual regression testing
+
+### Code Stats
+- MCP server: ~2943 lines (up from ~2731)
+- 31 MCP tools (up from 30)
+- Server version: 1.19.0
+
+### Next Steps
+- [ ] `computer_macro` tool (record + replay named action sequences)
+- [ ] `computer_window_tile` gap testing + cascade layout verification
+- [ ] Terminal detection improvements (more shell/emulator patterns)
+- [ ] Clipboard paste verification (ensure content actually arrived)
+- [ ] Screenshot diff: add "delete" mode to remove old baselines
