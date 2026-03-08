@@ -314,6 +314,18 @@ function clickWithModifier(x, y, button, modifier, containerName = DEFAULT_CONTA
   }
 }
 
+// Detect if the currently focused window is a terminal emulator
+// Uses WM_CLASS (more reliable) + window name fallback
+function isTerminalWindow(containerName = DEFAULT_CONTAINER) {
+  try {
+    const activeWin = dockerExec(`xdotool getactivewindow`, 5000, containerName).toString().trim();
+    const winName = dockerExec(`xdotool getwindowname ${activeWin} 2>/dev/null || echo ""`, 5000, containerName).toString().trim().toLowerCase();
+    const winClass = dockerExec(`xprop -id ${activeWin} WM_CLASS 2>/dev/null || echo ""`, 5000, containerName).toString().trim().toLowerCase();
+    return /terminal|xterm|rxvt|konsole|alacritty|kitty|tilix|sakura|lxterminal|terminator|urxvt|st-256color|foot|wezterm/.test(winName)
+      || /xfce4-terminal|gnome-terminal|xterm|rxvt|konsole|alacritty|kitty|tilix|terminator|sakura|st-256color|foot|wezterm/.test(winClass);
+  } catch { return false; }
+}
+
 // Clipboard paste helper — pastes text into active window via clipboard
 // Auto-detects terminal vs GUI for correct paste shortcut, restores original clipboard
 function clipboardPaste(content, containerName = DEFAULT_CONTAINER) {
@@ -343,18 +355,7 @@ function clipboardPaste(content, containerName = DEFAULT_CONTAINER) {
     } catch { /* verification failed — proceed anyway, paste may still work */ }
   }
 
-  // Detect terminal vs GUI for correct paste shortcut
-  // Check both window name and WM_CLASS (more reliable than title alone)
-  let isTerminal = false;
-  try {
-    const activeWin = dockerExec(`xdotool getactivewindow`, 5000, containerName).toString().trim();
-    const winName = dockerExec(`xdotool getwindowname ${activeWin} 2>/dev/null || echo ""`, 5000, containerName).toString().trim().toLowerCase();
-    const winClass = dockerExec(`xprop -id ${activeWin} WM_CLASS 2>/dev/null || echo ""`, 5000, containerName).toString().trim().toLowerCase();
-    isTerminal = /terminal|xterm|rxvt|konsole|alacritty|kitty|tilix|sakura|lxterminal|terminator|urxvt|st-256color|foot|wezterm/.test(winName)
-      || /xfce4-terminal|gnome-terminal|xterm|rxvt|konsole|alacritty|kitty|tilix|terminator|sakura|st-256color|foot|wezterm/.test(winClass);
-  } catch { /* default to GUI paste */ }
-
-  const pasteKey = isTerminal ? "ctrl+shift+v" : "ctrl+v";
+  const pasteKey = isTerminalWindow(containerName) ? "ctrl+shift+v" : "ctrl+v";
   xdotool(`key ${pasteKey}`, containerName);
 
   // Restore original clipboard in background after delay
@@ -1129,18 +1130,42 @@ server.tool(
 
 server.tool(
   "computer_env_resize",
-  "Change the display resolution of a virtual desktop environment. Restarts Xvfb and VNC — open windows may be rearranged.",
+  "Change the display resolution of a virtual desktop environment. Use preset for common device profiles or specify custom width/height. Restarts Xvfb and VNC — open windows may be rearranged.",
   {
     name: z.string().optional().describe("Environment name (default: primary)"),
-    width: z.number().describe("New display width in pixels"),
-    height: z.number().describe("New display height in pixels"),
+    preset: z.enum(["mobile_portrait", "mobile_landscape", "tablet_portrait", "tablet_landscape", "laptop", "desktop_hd", "desktop_4k"]).optional()
+      .describe("Device preset: mobile_portrait (375x812), mobile_landscape (812x375), tablet_portrait (768x1024), tablet_landscape (1024x768), laptop (1366x768), desktop_hd (1920x1080), desktop_4k (3840x2160)"),
+    width: z.number().optional().describe("New display width in pixels (overrides preset)"),
+    height: z.number().optional().describe("New display height in pixels (overrides preset)"),
   },
-  async ({ name, width, height }) => {
+  async ({ name, preset, width, height }) => {
     const cn = resolveContainer(name);
-    if (width < 320 || height < 240) {
+
+    // Resolution presets
+    const PRESETS = {
+      mobile_portrait: [375, 812],
+      mobile_landscape: [812, 375],
+      tablet_portrait: [768, 1024],
+      tablet_landscape: [1024, 768],
+      laptop: [1366, 768],
+      desktop_hd: [1920, 1080],
+      desktop_4k: [3840, 2160],
+    };
+
+    let w = width, h = height;
+    if (preset && PRESETS[preset]) {
+      if (!w) w = PRESETS[preset][0];
+      if (!h) h = PRESETS[preset][1];
+    }
+
+    if (!w || !h) {
+      return { content: [{ type: "text", text: "Provide width+height or a preset (mobile_portrait, mobile_landscape, tablet_portrait, tablet_landscape, laptop, desktop_hd, desktop_4k)" }], isError: true };
+    }
+
+    if (w < 320 || h < 240) {
       return { content: [{ type: "text", text: "Minimum resolution is 320x240" }], isError: true };
     }
-    if (width > 3840 || height > 2160) {
+    if (w > 3840 || h > 2160) {
       return { content: [{ type: "text", text: "Maximum resolution is 3840x2160" }], isError: true };
     }
 
@@ -1153,7 +1178,7 @@ server.tool(
       await new Promise(r => setTimeout(r, 1500));
 
       // Start new Xvfb with requested resolution (nohup + & to background)
-      dockerExec(`nohup Xvfb :${dn} -screen 0 ${width}x${height}x24 +extension GLX +render -noreset > /dev/null 2>&1 &`, 10000, cn);
+      dockerExec(`nohup Xvfb :${dn} -screen 0 ${w}x${h}x24 +extension GLX +render -noreset > /dev/null 2>&1 &`, 10000, cn);
       await new Promise(r => setTimeout(r, 2000));
 
       // Restart x11vnc
@@ -1170,12 +1195,13 @@ server.tool(
       // Update tracked resolution
       const env = environments.get(cn);
       if (env) {
-        env.width = width;
-        env.height = height;
+        env.width = w;
+        env.height = h;
       }
 
       const rApi = getApiDimensions(cn);
-      const resInfo = rApi.width !== width ? `${width}x${height} (API: ${rApi.width}x${rApi.height})` : `${width}x${height}`;
+      const presetLabel = preset ? ` (${preset})` : "";
+      const resInfo = rApi.width !== w ? `${w}x${h}${presetLabel} (API: ${rApi.width}x${rApi.height})` : `${w}x${h}${presetLabel}`;
 
       const ss = takeScreenshot(cn);
       return {
@@ -4494,18 +4520,27 @@ server.tool(
         originalClipboard = dockerExec(`xclip -selection clipboard -o 2>/dev/null || true`, 5000, cn).toString();
       } catch {}
 
+      // Detect terminal — terminals use ctrl+shift+{a,c} instead of ctrl+{a,c}
+      const isTerm = isTerminalWindow(cn);
+      const selectAllKey = isTerm ? "ctrl+shift+a" : "ctrl+a";
+      const copyKey = isTerm ? "ctrl+shift+c" : "ctrl+c";
+
       if (method !== "visible") {
         // Select all + copy
-        xdotool("key ctrl+a", cn);
+        xdotool(`key ${selectAllKey}`, cn);
         execFileSync("sleep", ["0.3"]);
-        xdotool("key ctrl+c", cn);
+        xdotool(`key ${copyKey}`, cn);
         execFileSync("sleep", ["0.3"]);
-        // Deselect to avoid visual artifacts (click at 0,0 or press Escape may be too disruptive)
-        // Just press Right arrow to deselect without moving cursor much
-        xdotool("key Right", cn);
+        // Deselect to avoid visual artifacts
+        if (isTerm) {
+          // In terminal, just press Right to deselect without side effects
+          xdotool("key Right", cn);
+        } else {
+          xdotool("key Right", cn);
+        }
       } else {
         // Just copy current selection
-        xdotool("key ctrl+c", cn);
+        xdotool(`key ${copyKey}`, cn);
         execFileSync("sleep", ["0.3"]);
       }
 
