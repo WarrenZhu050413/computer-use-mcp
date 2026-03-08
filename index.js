@@ -290,7 +290,7 @@ function executeAction({ action, coordinate, text, scroll_direction, scroll_amou
         // Clipboard paste fallback for unicode text:
         // 1. Save original clipboard
         // 2. Set clipboard to our text
-        // 3. Paste via ctrl+shift+v (xfce4-terminal) — works universally in our XFCE env
+        // 3. Detect window type (terminal vs GUI) and paste with correct shortcut
         // 4. Restore original clipboard
         let originalClipboard = "";
         try {
@@ -301,9 +301,15 @@ function executeAction({ action, coordinate, text, scroll_direction, scroll_amou
         const tmpPath = `/tmp/_type_uni_${id}.txt`;
         dockerExec(`echo ${b64Full} | base64 -d > ${tmpPath}`, 30000, containerName);
         dockerExec(`cat ${tmpPath} | xclip -selection clipboard -i && rm -f ${tmpPath}`, 30000, containerName);
-        // Paste: ctrl+shift+v works in xfce4-terminal; for GUI apps, ctrl+v also works
-        // We send ctrl+shift+v (no --clearmodifiers, which breaks modifier combos)
-        xdotool("key ctrl+shift+v", containerName);
+        // Detect if focused window is a terminal emulator (ctrl+shift+v) vs GUI app (ctrl+v)
+        // Terminal emulators intercept ctrl+v as "literal next char", so they need ctrl+shift+v
+        let isTerminal = false;
+        try {
+          const winName = dockerExec(`xdotool getactivewindow getwindowname 2>/dev/null || echo ""`, 5000, containerName).toString().trim().toLowerCase();
+          isTerminal = /terminal|xterm|rxvt|konsole|alacritty|kitty|tilix|sakura|lxterminal|terminator|urxvt/.test(winName);
+        } catch { /* default to GUI paste if detection fails */ }
+        const pasteKey = isTerminal ? "ctrl+shift+v" : "ctrl+v";
+        xdotool(`key ${pasteKey}`, containerName);
         // Restore original clipboard after a brief delay
         if (originalClipboard) {
           const b64Orig = Buffer.from(originalClipboard).toString("base64");
