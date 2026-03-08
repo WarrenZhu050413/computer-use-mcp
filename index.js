@@ -4,7 +4,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { execFileSync } from "child_process";
 import { randomUUID } from "crypto";
-import { mkdirSync, readFileSync, writeFileSync, existsSync } from "fs";
+import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync } from "fs";
 import { basename, extname } from "path";
 
 // Default configuration (from environment)
@@ -22,6 +22,9 @@ const DEFAULT_DISPLAY_NUMBER = parseInt(process.env.DISPLAY_NUMBER || "1", 10);
 const TYPING_DELAY_MS = 12;
 const MAX_RESPONSE_LEN = 16000;
 const MAX_API_DIMENSION = 1568; // Anthropic spec: max longest edge in API space
+
+// === Session recording ===
+const activeSessions = new Map(); // sessionName -> { name, container, started, actions[] }
 
 // === Multi-container environment tracking ===
 const environments = new Map();
@@ -399,7 +402,7 @@ function executeAction({ action, coordinate, text, scroll_direction, scroll_amou
 
 const server = new McpServer({
   name: "computer-use",
-  version: "1.7.1",
+  version: "1.8.0",
 });
 
 const actionSchema = {
@@ -446,6 +449,17 @@ Multi-container: use container_name to target a specific environment (see comput
 
       switch (action) {
         case "screenshot": {
+          // Record screenshot action if session is active
+          for (const [, session] of activeSessions) {
+            if (session.container === cn) {
+              session.actions.push({
+                timestamp: new Date().toISOString(),
+                elapsed_ms: Date.now() - session.startedMs,
+                action: "screenshot",
+                params: {},
+              });
+            }
+          }
           const ss = takeScreenshot(cn);
           return {
             content: [
@@ -493,6 +507,17 @@ Multi-container: use container_name to target a specific environment (see comput
         case "wait": {
           if (!duration) throw new Error("duration required for wait action");
           if (duration <= 0 || duration > 100) throw new Error("duration must be between 0 and 100 seconds");
+          // Record wait action
+          for (const [, session] of activeSessions) {
+            if (session.container === cn) {
+              session.actions.push({
+                timestamp: new Date().toISOString(),
+                elapsed_ms: Date.now() - session.startedMs,
+                action: "wait",
+                params: { duration },
+              });
+            }
+          }
           await new Promise(r => setTimeout(r, duration * 1000));
           const ss = takeScreenshot(cn);
           return {
@@ -552,6 +577,21 @@ Multi-container: use container_name to target a specific environment (see comput
 
         default:
           throw new Error(`Unknown action: ${action}`);
+      }
+
+      // Record action if a session is active for this container
+      for (const [, session] of activeSessions) {
+        if (session.container === cn) {
+          session.actions.push({
+            timestamp: new Date().toISOString(),
+            elapsed_ms: Date.now() - session.startedMs,
+            action,
+            params: Object.fromEntries(
+              Object.entries({ coordinate, text, scroll_direction, scroll_amount, start_coordinate, duration, region })
+                .filter(([, v]) => v !== undefined)
+            ),
+          });
+        }
       }
 
       // For non-screenshot/wait/zoom/cursor_position actions, capture follow-up screenshot
@@ -1281,6 +1321,258 @@ server.tool(
         isError: true
       };
     }
+  }
+);
+
+// === Session Recording/Replay Tools ===
+
+server.tool(
+  "computer_session_start",
+  "Start recording actions performed on a virtual desktop. All subsequent computer actions will be logged to the session. Use computer_session_stop to save the recording.",
+  {
+    name: z.string().optional().describe("Session name (auto-generated if omitted)"),
+    container_name: z.string().optional().describe("Container to record (default: primary)"),
+  },
+  async ({ name, container_name }) => {
+    const cn = resolveContainer(container_name);
+    const sessionName = name || `session-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}`;
+
+    if (activeSessions.has(sessionName)) {
+      return {
+        content: [{ type: "text", text: `Session '${sessionName}' is already recording` }],
+        isError: true
+      };
+    }
+
+    // Only one active session per container
+    for (const [existingName, session] of activeSessions) {
+      if (session.container === cn) {
+        return {
+          content: [{ type: "text", text: `Container '${cn}' already has active session '${existingName}'. Stop it first.` }],
+          isError: true
+        };
+      }
+    }
+
+    const env = environments.get(cn);
+    activeSessions.set(sessionName, {
+      name: sessionName,
+      container: cn,
+      started: new Date().toISOString(),
+      startedMs: Date.now(),
+      resolution: `${env?.width || DISPLAY_WIDTH}x${env?.height || DISPLAY_HEIGHT}`,
+      actions: [],
+    });
+
+    return {
+      content: [{ type: "text", text: `Recording started: '${sessionName}' on container '${cn}'\nAll computer actions will be logged. Use computer_session_stop to save.` }]
+    };
+  }
+);
+
+server.tool(
+  "computer_session_stop",
+  "Stop recording and save the session to the workspace. Returns a summary of recorded actions.",
+  {
+    name: z.string().optional().describe("Session name to stop (stops the only active session if omitted)"),
+    discard: z.boolean().optional().describe("If true, discard the recording instead of saving (default: false)"),
+  },
+  async ({ name, discard }) => {
+    let sessionName = name;
+
+    // If no name given and exactly one active session, use that
+    if (!sessionName) {
+      if (activeSessions.size === 0) {
+        return { content: [{ type: "text", text: "No active recording sessions" }], isError: true };
+      }
+      if (activeSessions.size === 1) {
+        sessionName = activeSessions.keys().next().value;
+      } else {
+        const names = [...activeSessions.keys()].join(", ");
+        return {
+          content: [{ type: "text", text: `Multiple active sessions: ${names}. Specify which to stop.` }],
+          isError: true
+        };
+      }
+    }
+
+    const session = activeSessions.get(sessionName);
+    if (!session) {
+      return { content: [{ type: "text", text: `No active session '${sessionName}'` }], isError: true };
+    }
+
+    activeSessions.delete(sessionName);
+
+    if (discard) {
+      return {
+        content: [{ type: "text", text: `Session '${sessionName}' discarded (${session.actions.length} actions)` }]
+      };
+    }
+
+    // Save session to workspace
+    const sessionData = {
+      name: session.name,
+      container: session.container,
+      resolution: session.resolution,
+      started: session.started,
+      ended: new Date().toISOString(),
+      duration_ms: Date.now() - session.startedMs,
+      action_count: session.actions.length,
+      actions: session.actions,
+    };
+
+    const env = environments.get(session.container);
+    const workspace = env?.workspace || DEFAULT_WORKSPACE;
+    const sessionsDir = `${workspace}/sessions`;
+    try { mkdirSync(sessionsDir, { recursive: true }); } catch {}
+    const filePath = `${sessionsDir}/${sessionName}.json`;
+    writeFileSync(filePath, JSON.stringify(sessionData, null, 2));
+
+    // Build action summary
+    const actionCounts = {};
+    for (const a of session.actions) {
+      actionCounts[a.action] = (actionCounts[a.action] || 0) + 1;
+    }
+    const summary = Object.entries(actionCounts).map(([k, v]) => `  ${k}: ${v}`).join("\n");
+
+    return {
+      content: [{ type: "text", text:
+        `Session '${sessionName}' saved (${session.actions.length} actions, ${Math.round(sessionData.duration_ms / 1000)}s)\n` +
+        `File: ${filePath}\n` +
+        `Resolution: ${session.resolution}\n` +
+        `Actions:\n${summary}\n\n` +
+        `Use computer_session_replay to replay this session.`
+      }]
+    };
+  }
+);
+
+server.tool(
+  "computer_session_replay",
+  "Replay a previously recorded session. Executes all recorded actions in order with timing preservation.",
+  {
+    name: z.string().describe("Session name or path to session JSON file"),
+    speed: z.number().optional().describe("Playback speed multiplier (default: 1.0, use 2.0 for 2x speed, 0.5 for half speed)"),
+    container_name: z.string().optional().describe("Target container (default: uses container from recording)"),
+    dry_run: z.boolean().optional().describe("If true, just list the actions without executing them"),
+  },
+  async ({ name, speed, container_name, dry_run }) => {
+    const playbackSpeed = Math.max(0.1, Math.min(speed || 1.0, 10.0));
+
+    // Load session — check workspace first, then treat as absolute path
+    let sessionData;
+    const env = environments.get(container_name || DEFAULT_CONTAINER);
+    const workspace = env?.workspace || DEFAULT_WORKSPACE;
+    const sessionPath = `${workspace}/sessions/${name}.json`;
+
+    try {
+      if (existsSync(sessionPath)) {
+        sessionData = JSON.parse(readFileSync(sessionPath, "utf-8"));
+      } else if (existsSync(name)) {
+        sessionData = JSON.parse(readFileSync(name, "utf-8"));
+      } else {
+        // Try listing available sessions
+        let available = "";
+        const sessDir = `${workspace}/sessions`;
+        try {
+          available = readdirSync(sessDir).filter(f => f.endsWith(".json")).map(f => f.replace(".json", "")).join(", ");
+        } catch {}
+        return {
+          content: [{ type: "text", text: `Session '${name}' not found at ${sessionPath}${available ? `\nAvailable sessions: ${available}` : ""}` }],
+          isError: true
+        };
+      }
+    } catch (err) {
+      return {
+        content: [{ type: "text", text: `Failed to load session: ${err.message}` }],
+        isError: true
+      };
+    }
+
+    const cn = resolveContainer(container_name || sessionData.container);
+    const actions = sessionData.actions || [];
+
+    if (actions.length === 0) {
+      return { content: [{ type: "text", text: `Session '${name}' has no actions to replay` }] };
+    }
+
+    // Dry run — just list actions
+    if (dry_run) {
+      const listing = actions.map((a, i) =>
+        `${i + 1}. [${(a.elapsed_ms / 1000).toFixed(1)}s] ${a.action}${a.params ? " " + JSON.stringify(a.params) : ""}`
+      ).join("\n");
+      return {
+        content: [{ type: "text", text:
+          `Session '${sessionData.name}' (${actions.length} actions, ${Math.round(sessionData.duration_ms / 1000)}s)\n` +
+          `Speed: ${playbackSpeed}x → ~${Math.round(sessionData.duration_ms / playbackSpeed / 1000)}s\n\n${listing}`
+        }]
+      };
+    }
+
+    // Execute replay
+    let completed = 0;
+    let errors = [];
+    let prevElapsed = 0;
+
+    for (const actionEntry of actions) {
+      // Wait for timing (preserve relative delays between actions)
+      const delay = actionEntry.elapsed_ms - prevElapsed;
+      if (delay > 0) {
+        await new Promise(r => setTimeout(r, delay / playbackSpeed));
+      }
+      prevElapsed = actionEntry.elapsed_ms;
+
+      try {
+        const { action, params } = actionEntry;
+        // Skip screenshot-only actions during replay (they don't do anything)
+        if (action === "screenshot") {
+          completed++;
+          continue;
+        }
+
+        if (action === "wait") {
+          const waitDur = (params?.duration || 1) / playbackSpeed;
+          await new Promise(r => setTimeout(r, waitDur * 1000));
+          completed++;
+          continue;
+        }
+
+        // Execute the action
+        executeAction({
+          action,
+          coordinate: params?.coordinate,
+          text: params?.text,
+          scroll_direction: params?.scroll_direction,
+          scroll_amount: params?.scroll_amount,
+          start_coordinate: params?.start_coordinate,
+          duration: params?.duration,
+          region: params?.region,
+        }, cn);
+        completed++;
+
+        // Brief delay after each action (let the UI catch up)
+        await new Promise(r => setTimeout(r, Math.max(200, SCREENSHOT_DELAY_MS / 2) / playbackSpeed));
+
+      } catch (err) {
+        errors.push(`Action ${completed + 1} (${actionEntry.action}): ${err.message}`);
+        completed++;
+      }
+    }
+
+    // Final screenshot
+    const ss = takeScreenshot(cn);
+    const resultText = [
+      `Replay complete: '${sessionData.name}'`,
+      `${completed}/${actions.length} actions executed at ${playbackSpeed}x speed`,
+      errors.length > 0 ? `\nErrors (${errors.length}):\n${errors.join("\n")}` : "",
+    ].filter(Boolean).join("\n");
+
+    return {
+      content: [
+        { type: "image", data: ss.data, mimeType: ss.mimeType },
+        { type: "text", text: resultText }
+      ]
+    };
   }
 );
 
