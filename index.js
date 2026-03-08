@@ -5252,5 +5252,215 @@ server.tool(
   }
 );
 
+// ── computer_tabs ────────────────────────────────────────────────
+
+server.tool(
+  "computer_tabs",
+  "Browser tab management: list, switch, close, or open tabs. Uses AT-SPI2 accessibility tree to reliably identify browser tabs by title. Active tab marked with 'selected' state. Works with Firefox (auto-detected).",
+  {
+    action: z.enum(["list", "switch", "close", "new"]).describe("list=show all tabs, switch=activate a tab, close=close a tab, new=open new tab"),
+    target: z.union([z.string(), z.number()]).optional().describe("Tab index (0-based) or title substring. Required for switch/close actions."),
+    url: z.string().optional().describe("URL to navigate to after opening new tab (for 'new' action)"),
+    include_url: z.boolean().default(false).describe("For 'list': also read the URL of the active tab from the address bar (adds ~500ms)"),
+    container_name: z.string().optional().describe("Target container (default: primary)"),
+  },
+  async ({ action, target, url, include_url, container_name }) => {
+    const cn = container_name || DEFAULT_CONTAINER;
+    try {
+      // Helper: get browser tabs from a11y tree
+      function getBrowserTabs() {
+        const q = queryA11yFlat({ role: "page tab", app: "Firefox", container_name: cn });
+        if (q.error) return { error: q.error };
+
+        // Filter to actual browser tabs (under "Browser tabs" toolbar, not in-page tabs)
+        const browserTabs = q.matches.filter(node =>
+          node.path && node.path.includes("Browser tabs")
+        );
+
+        return {
+          tabs: browserTabs.map((tab, i) => ({
+            index: i,
+            title: tab.name || "(untitled)",
+            active: (tab.states || []).includes("selected"),
+            bbox: tab.bbox, // display coordinates
+          }))
+        };
+      }
+
+      // Helper: find tab by index or title substring
+      function findTab(tabs, tgt) {
+        if (typeof tgt === "number") {
+          if (tgt < 0 || tgt >= tabs.length) {
+            return { error: `Tab index ${tgt} out of range (0-${tabs.length - 1})` };
+          }
+          return { tab: tabs[tgt] };
+        }
+        // String: title substring match (case-insensitive)
+        const needle = String(tgt).toLowerCase();
+        const match = tabs.find(t => t.title.toLowerCase().includes(needle));
+        if (!match) {
+          return { error: `No tab matching "${tgt}". Tabs: ${tabs.map(t => t.title).join(", ")}` };
+        }
+        return { tab: match };
+      }
+
+      // Helper: click a tab's a11y element
+      function clickTab(tab) {
+        const displayX = tab.bbox.x + Math.round(tab.bbox.width / 2);
+        const displayY = tab.bbox.y + Math.round(tab.bbox.height / 2);
+        xdotool(`mousemove ${displayX} ${displayY} click 1`, cn);
+      }
+
+      // Helper: get active tab URL from address bar
+      function getActiveTabUrl() {
+        try {
+          // Focus address bar, select all, copy to clipboard
+          xdotool("key ctrl+l", cn);
+          const sleepSync = ms => { try { execFileSync("sleep", [String(ms / 1000)]); } catch {} };
+          sleepSync(200);
+          xdotool("key ctrl+c", cn);
+          sleepSync(100);
+          const urlText = dockerExec("xclip -o -selection clipboard 2>/dev/null || echo ''", 5000, cn).toString().trim();
+          // Press Escape to deselect address bar
+          xdotool("key Escape", cn);
+          return urlText;
+        } catch {
+          return null;
+        }
+      }
+
+      // ── LIST ──
+      if (action === "list") {
+        const result = getBrowserTabs();
+        if (result.error) return { content: [{ type: "text", text: result.error }], isError: true };
+
+        // Optionally get URL of active tab
+        let activeUrl = null;
+        if (include_url) {
+          activeUrl = getActiveTabUrl();
+        }
+
+        await new Promise(r => setTimeout(r, 300));
+        const ss = takeScreenshot(cn);
+
+        const env = environments.get(cn);
+        const dispW = env?.width || DISPLAY_WIDTH;
+        const dispH = env?.height || DISPLAY_HEIGHT;
+        const scaleFactor = getScaleFactor(dispW, dispH);
+
+        const tabLines = result.tabs.map(t => {
+          let line = `${t.active ? "→" : " "} [${t.index}] ${t.title}`;
+          if (t.active && activeUrl) line += `\n     URL: ${activeUrl}`;
+          return line;
+        }).join("\n");
+
+        return {
+          content: [
+            { type: "image", data: ss.data, mimeType: ss.mimeType },
+            { type: "text", text: `${result.tabs.length} browser tab(s):\n${tabLines}` }
+          ]
+        };
+      }
+
+      // ── SWITCH ──
+      if (action === "switch") {
+        if (target === undefined) {
+          return { content: [{ type: "text", text: "Error: 'target' required for switch (tab index or title substring)" }], isError: true };
+        }
+        const result = getBrowserTabs();
+        if (result.error) return { content: [{ type: "text", text: result.error }], isError: true };
+
+        const found = findTab(result.tabs, target);
+        if (found.error) return { content: [{ type: "text", text: `Error: ${found.error}` }], isError: true };
+
+        if (found.tab.active) {
+          const ss = takeScreenshot(cn);
+          return {
+            content: [
+              { type: "image", data: ss.data, mimeType: ss.mimeType },
+              { type: "text", text: `Tab [${found.tab.index}] "${found.tab.title}" is already active` }
+            ]
+          };
+        }
+
+        clickTab(found.tab);
+        await new Promise(r => setTimeout(r, SCREENSHOT_DELAY_MS));
+        const ss = takeScreenshot(cn);
+
+        return {
+          content: [
+            { type: "image", data: ss.data, mimeType: ss.mimeType },
+            { type: "text", text: `Switched to tab [${found.tab.index}] "${found.tab.title}"` }
+          ]
+        };
+      }
+
+      // ── CLOSE ──
+      if (action === "close") {
+        if (target === undefined) {
+          return { content: [{ type: "text", text: "Error: 'target' required for close (tab index or title substring)" }], isError: true };
+        }
+        const result = getBrowserTabs();
+        if (result.error) return { content: [{ type: "text", text: result.error }], isError: true };
+
+        if (result.tabs.length <= 1) {
+          return { content: [{ type: "text", text: "Error: cannot close the last remaining tab" }], isError: true };
+        }
+
+        const found = findTab(result.tabs, target);
+        if (found.error) return { content: [{ type: "text", text: `Error: ${found.error}` }], isError: true };
+
+        const closedTitle = found.tab.title;
+        const closedIdx = found.tab.index;
+
+        // Switch to the tab first if not active, then close
+        if (!found.tab.active) {
+          clickTab(found.tab);
+          await new Promise(r => setTimeout(r, 500));
+        }
+        xdotool("key ctrl+w", cn);
+        await new Promise(r => setTimeout(r, SCREENSHOT_DELAY_MS));
+        const ss = takeScreenshot(cn);
+
+        return {
+          content: [
+            { type: "image", data: ss.data, mimeType: ss.mimeType },
+            { type: "text", text: `Closed tab [${closedIdx}] "${closedTitle}". ${result.tabs.length - 1} tab(s) remaining.` }
+          ]
+        };
+      }
+
+      // ── NEW ──
+      if (action === "new") {
+        xdotool("key ctrl+t", cn);
+        await new Promise(r => setTimeout(r, 500));
+
+        if (url) {
+          // Type URL into the address bar (new tab auto-focuses it)
+          const b64 = Buffer.from(url).toString('base64');
+          dockerExec(`bash -c "echo '${b64}' | base64 -d > /tmp/xdotype.txt && xdotool type --delay 2 --file /tmp/xdotype.txt"`, 10000, cn);
+          xdotool("key Return", cn);
+          await new Promise(r => setTimeout(r, 2000)); // Wait for page load
+        }
+
+        const ss = takeScreenshot(cn);
+        const result = getBrowserTabs();
+        const tabCount = result.error ? "?" : result.tabs.length;
+
+        return {
+          content: [
+            { type: "image", data: ss.data, mimeType: ss.mimeType },
+            { type: "text", text: `Opened new tab${url ? ` → ${url}` : ""}. ${tabCount} tab(s) total.` }
+          ]
+        };
+      }
+
+      return { content: [{ type: "text", text: `Error: unknown action "${action}"` }], isError: true };
+    } catch (err) {
+      return { content: [{ type: "text", text: `Tabs error: ${err.message}` }], isError: true };
+    }
+  }
+);
+
 const transport = new StdioServerTransport();
 await server.connect(transport);
