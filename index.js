@@ -753,6 +753,10 @@ server.tool(
       dockerExec(`nohup x11vnc -display :1 -forever -passwd secret -noxdamage -shared -rfbport 5900 -noscr > /dev/null 2>&1 &`, 10000, cn);
       await new Promise(r => setTimeout(r, 1000));
 
+      // Restart XFCE desktop (killed when Xvfb died)
+      dockerExec(`nohup startxfce4 > /dev/null 2>&1 &`, 10000, cn);
+      await new Promise(r => setTimeout(r, 3000));
+
       // Verify new resolution
       const geom = dockerExec("xdotool getdisplaygeometry", 10000, cn).toString().trim();
 
