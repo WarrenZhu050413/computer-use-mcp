@@ -1632,6 +1632,25 @@ Improved clipboard paste terminal-vs-GUI detection to check X11 `WM_CLASS` prope
 
 ---
 
+## Cycle 35 (2026-03-08)
+
+### Container Health Monitoring & Recovery
+
+1. **computer_health_check tool**: Deep diagnostics with 8 checks — container status, X11 display, VNC, window manager, memory usage, disk usage, top processes, and restart history. Optional `repair=true` mode auto-restarts unhealthy containers. Returns HEALTHY/DEGRADED summary with per-check status.
+
+2. **Restart event tracking**: In-memory log of all container restarts with timestamp, reason, and success/failure. Capped at 100 entries. `restartContainer()` now logs every restart attempt. Health check reports recent restart frequency (warns if ≥3 in last hour).
+
+3. **Improved dockerExec retry**: 2 recovery attempts with backoff (immediate + 2s delay) instead of single retry. Each attempt logs descriptive reason (e.g. "auto-recovery attempt 1"). Reduces transient failure impact.
+
+4. **API spec verification**: Browsed Anthropic Computer Use docs in VM. Confirmed no changes since `computer_20251124` / `text_editor_20250728`. All 16 spec actions + zoom match our implementation.
+
+### Verification Results
+- **sc-136**: health check tool — all 8 diagnostics returned ok (container, x11, vnc, wm, memory 19%, disk 50%, processes, restart history) ✅
+- **sc-137**: restart logging — logRestart() wired at 3 call sites, empty state handled gracefully ✅
+- **sc-138**: dogfooding — browsed Anthropic docs in Firefox using navigate/scroll/key/type/triple_click ✅
+
+**Version**: 1.28.0 | **MCP tools**: 36
+
 ## Cycle 34 (2026-03-08)
 
 ### Inline Action Batching
