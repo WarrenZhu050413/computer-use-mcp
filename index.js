@@ -186,6 +186,7 @@ function executeAction({ action, coordinate, text, scroll_direction, scroll_amou
     case "scroll": {
       const dir = scroll_direction || "down";
       const amount = scroll_amount || 3;
+      if (amount < 0) throw new Error("scroll_amount must be non-negative");
       if (coordinate) {
         const [x, y] = validateCoord(coordinate);
         xdotool(`mousemove ${x} ${y}`);
@@ -306,6 +307,7 @@ hold_key: holds a key and executes a nested action (via hold_key_action param), 
             } else {
               // Fallback: hold for duration seconds
               const dur = duration || 1;
+              if (dur <= 0 || dur > 100) throw new Error("duration must be between 0 and 100 seconds");
               dockerExec(`sleep ${dur}`);
             }
           } finally {
@@ -316,6 +318,7 @@ hold_key: holds a key and executes a nested action (via hold_key_action param), 
 
         case "wait": {
           if (!duration) throw new Error("duration required for wait action");
+          if (duration <= 0 || duration > 100) throw new Error("duration must be between 0 and 100 seconds");
           await new Promise(r => setTimeout(r, duration * 1000));
           const b64 = takeScreenshot();
           return {
