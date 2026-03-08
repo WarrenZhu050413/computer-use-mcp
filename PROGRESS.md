@@ -1632,6 +1632,15 @@ Improved clipboard paste terminal-vs-GUI detection to check X11 `WM_CLASS` prope
 
 ---
 
+## Cycle 34 (2026-03-08)
+
+### Inline Action Batching
+
+1. **computer_batch tool**: Execute multiple actions in a single MCP call, returning only the final screenshot. Supports up to 50 actions per batch with configurable delay (0-5000ms, default 100ms). Stops on first error by default; `continue_on_error=true` skips failures and continues. Actions: left_click, right_click, middle_click, double_click, triple_click, left_click_drag, type, key, mouse_move, scroll, left_mouse_down, left_mouse_up, wait.
+2. **Real-world verification**: Used batch to write and execute a Python sysinfo script in VM terminal — 5 actions (heredoc write + execute) in a single tool call. Previously would have required 5 separate calls.
+
+**Version**: 1.27.0 | **MCP tools**: 35
+
 ## Cycle 33 (2026-03-08)
 
 ### Macro Dry-Run Mode & Screenshot Performance Optimization
