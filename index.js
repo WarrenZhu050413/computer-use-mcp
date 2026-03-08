@@ -228,12 +228,22 @@ Coordinates are [x, y] from top-left origin. Every action returns a follow-up sc
         }
 
         case "left_mouse_down": {
-          xdotool(`mousedown 1`);
+          if (coordinate) {
+            const [x, y] = validateCoord(coordinate);
+            xdotool(`mousemove ${x} ${y} mousedown 1`);
+          } else {
+            xdotool(`mousedown 1`);
+          }
           break;
         }
 
         case "left_mouse_up": {
-          xdotool(`mouseup 1`);
+          if (coordinate) {
+            const [x, y] = validateCoord(coordinate);
+            xdotool(`mousemove ${x} ${y} mouseup 1`);
+          } else {
+            xdotool(`mouseup 1`);
+          }
           break;
         }
 
