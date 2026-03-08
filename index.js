@@ -236,29 +236,27 @@ function takeScreenshot(containerName = DEFAULT_CONTAINER) {
   const needsScale = api.width !== displayW || api.height !== displayH;
   const useJpeg = SCREENSHOT_FORMAT === "jpeg" || SCREENSHOT_FORMAT === "jpg";
 
-  // Fast path: scrot direct JPEG when no scaling needed (~5ms vs ~30ms with convert)
+  // Fast path: scrot direct JPEG, single docker exec (~45ms vs ~75ms with 2 calls)
   if (useJpeg && !needsScale) {
     const jpgPath = `/tmp/_ss_${id}.jpg`;
-    dockerExec(`scrot -o -q ${SCREENSHOT_QUALITY} ${jpgPath}`, 30000, containerName);
-    const b64 = dockerExec(`base64 ${jpgPath} && rm -f ${jpgPath}`, 30000, containerName).toString().replace(/\s/g, "");
+    const b64 = dockerExec(`scrot -o -q ${SCREENSHOT_QUALITY} ${jpgPath} && base64 ${jpgPath} && rm -f ${jpgPath}`, 30000, containerName).toString().replace(/\s/g, "");
     return { data: b64, mimeType: "image/jpeg", apiWidth: api.width, apiHeight: api.height };
   }
 
-  // Standard path: scrot PNG + optional convert (for scaling or format conversion)
-  const pngPath = `/tmp/_ss_${id}.png`;
-  dockerExec(`scrot -o ${pngPath}`, 30000, containerName);
-
+  // Standard path: scrot PNG + convert (for scaling or format conversion)
   if (needsScale || useJpeg) {
+    const pngPath = `/tmp/_ss_${id}.png`;
     const outExt = useJpeg ? "jpg" : "png";
     const outPath = `/tmp/_ss_${id}_out.${outExt}`;
     const resizeFlag = needsScale ? `-resize ${api.width}x${api.height}!` : "";
     const qualityFlag = useJpeg ? `-quality ${SCREENSHOT_QUALITY}` : "";
-    dockerExec(`convert ${pngPath} ${resizeFlag} ${qualityFlag} ${outPath}`, 30000, containerName);
-    const b64 = dockerExec(`base64 ${outPath} && rm -f ${pngPath} ${outPath}`, 30000, containerName).toString().replace(/\s/g, "");
+    const b64 = dockerExec(`scrot -o ${pngPath} && convert ${pngPath} ${resizeFlag} ${qualityFlag} ${outPath} && base64 ${outPath} && rm -f ${pngPath} ${outPath}`, 30000, containerName).toString().replace(/\s/g, "");
     return { data: b64, mimeType: useJpeg ? "image/jpeg" : "image/png", apiWidth: api.width, apiHeight: api.height };
   }
 
-  const b64 = dockerExec(`base64 ${pngPath} && rm -f ${pngPath}`, 30000, containerName).toString().replace(/\s/g, "");
+  // PNG path (no scaling needed): single docker exec
+  const pngPath = `/tmp/_ss_${id}.png`;
+  const b64 = dockerExec(`scrot -o ${pngPath} && base64 ${pngPath} && rm -f ${pngPath}`, 30000, containerName).toString().replace(/\s/g, "");
   return { data: b64, mimeType: "image/png", apiWidth: api.width, apiHeight: api.height };
 }
 
@@ -721,11 +719,9 @@ Multi-container: use container_name to target a specific environment (see comput
           const useJpeg = SCREENSHOT_FORMAT === "jpeg" || SCREENSHOT_FORMAT === "jpg";
           const outExt = useJpeg ? "jpg" : "png";
           const zoomPath = `/tmp/_zoom_${zId}.${outExt}`;
-          dockerExec(`scrot -o ${ssPath}`, 30000, cn);
           const qualityFlag = useJpeg ? `-quality ${SCREENSHOT_QUALITY}` : "";
-          // Crop at display coords, resize to API dimensions
-          dockerExec(`convert ${ssPath} -crop ${cropW}x${cropH}+${dx1}+${dy1} +repage -resize ${zApi.width}x${zApi.height} ${qualityFlag} ${zoomPath}`, 30000, cn);
-          const b64 = dockerExec(`base64 ${zoomPath} && rm -f ${ssPath} ${zoomPath}`, 30000, cn).toString().replace(/\s/g, "");
+          // Single docker exec: capture + crop + resize + encode + cleanup
+          const b64 = dockerExec(`scrot -o ${ssPath} && convert ${ssPath} -crop ${cropW}x${cropH}+${dx1}+${dy1} +repage -resize ${zApi.width}x${zApi.height} ${qualityFlag} ${zoomPath} && base64 ${zoomPath} && rm -f ${ssPath} ${zoomPath}`, 30000, cn).toString().replace(/\s/g, "");
           const zoomMime = useJpeg ? "image/jpeg" : "image/png";
           return {
             content: [
@@ -2516,9 +2512,7 @@ Optional region parameter monitors only a portion of the screen (avoids false tr
         const outExt = useJpeg ? "jpg" : "png";
         const cropPath = `/tmp/_wf_${id}_crop.${outExt}`;
         const qualityFlag = useJpeg ? `-quality ${SCREENSHOT_QUALITY}` : "";
-        dockerExec(`scrot -o ${ssPath}`, 30000, cn);
-        dockerExec(`convert ${ssPath} -crop ${cropW}x${cropH}+${dx1}+${dy1} +repage ${qualityFlag} ${cropPath}`, 30000, cn);
-        const b64 = dockerExec(`base64 ${cropPath} && rm -f ${ssPath} ${cropPath}`, 30000, cn).toString().replace(/\s/g, "");
+        const b64 = dockerExec(`scrot -o ${ssPath} && convert ${ssPath} -crop ${cropW}x${cropH}+${dx1}+${dy1} +repage ${qualityFlag} ${cropPath} && base64 ${cropPath} && rm -f ${ssPath} ${cropPath}`, 30000, cn).toString().replace(/\s/g, "");
         const hash = createHash("md5").update(b64).digest("hex");
         const mime = useJpeg ? "image/jpeg" : "image/png";
         return { hash, data: b64, mimeType: mime };
@@ -3067,8 +3061,7 @@ Optionally auto-clicks the found text.`,
         // Detect stuck (page didn't scroll — hit top/bottom)
         const id = randomUUID().slice(0, 8);
         const checkPath = `/tmp/_st_${id}.png`;
-        dockerExec(`scrot -o ${checkPath}`, 30000, cn);
-        const hashOut = dockerExec(`md5sum ${checkPath} && rm -f ${checkPath}`, 10000, cn).toString().trim();
+        const hashOut = dockerExec(`scrot -o ${checkPath} && md5sum ${checkPath} && rm -f ${checkPath}`, 30000, cn).toString().trim();
         const currentHash = hashOut.split(/\s+/)[0];
         if (prevScreenHash && currentHash === prevScreenHash) {
           // Screen didn't change — hit the end
