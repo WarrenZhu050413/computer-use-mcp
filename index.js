@@ -2997,7 +2997,7 @@ server.tool(
   `Define, run, list, edit, or delete reusable named action sequences (macros).
 Macros are named sequences of computer actions that can be replayed on demand — like keyboard macros but for the full desktop.
 - "save": Define a macro from a JSON array of actions, or convert a session recording into a macro.
-- "run": Execute a saved macro. Supports repeat count and speed multiplier.
+- "run": Execute a saved macro. Supports repeat count and speed multiplier. Use dry_run=true to preview actions without executing.
 - "edit": Replace the actions in an existing macro. Preserves name and metadata, updates actions/description/count.
 - "list": Show all saved macros with action counts.
 - "delete": Remove a macro by name, or all macros with name="all".
@@ -3011,9 +3011,10 @@ Actions format: [{"action":"key","text":"ctrl+t"},{"action":"type","text":"examp
     repeat: z.number().optional().describe("Number of times to run the macro (default: 1). For 'run' mode."),
     speed: z.number().optional().describe("Playback speed multiplier (default: 1.0). For 'run' mode."),
     delay_between: z.number().optional().describe("Seconds to wait between repetitions when repeat > 1 (default: 0.5)"),
+    dry_run: z.boolean().optional().describe("Preview mode for 'run': list all actions without executing them (default: false)"),
     container_name: z.string().optional().describe("Target container (default: primary)"),
   },
-  async ({ mode, name, actions, from_session, repeat, speed, delay_between, container_name }) => {
+  async ({ mode, name, actions, from_session, repeat, speed, delay_between, dry_run, container_name }) => {
     try {
       const cn = resolveContainer(container_name);
       const macroDir = "/workspace/.macros";
@@ -3246,6 +3247,28 @@ Actions format: [{"action":"key","text":"ctrl+t"},{"action":"type","text":"examp
         const macroActions = macroData.actions || [];
         if (macroActions.length === 0) {
           return { content: [{ type: "text", text: `Macro '${name}' has no actions` }] };
+        }
+
+        // Dry run: preview actions without executing
+        if (dry_run) {
+          const repeatCount = Math.max(1, Math.min(repeat || 1, 100));
+          const playbackSpeed = Math.max(0.1, Math.min(speed || 1.0, 10.0));
+          const lines = macroActions.map((a, i) => {
+            let detail = a.action;
+            if (a.coordinate) detail += ` at [${a.coordinate}]`;
+            if (a.text !== undefined) detail += ` "${a.text.length > 60 ? a.text.slice(0, 57) + "..." : a.text}"`;
+            if (a.scroll_direction) detail += ` ${a.scroll_direction}`;
+            if (a.scroll_amount !== undefined) detail += ` x${a.scroll_amount}`;
+            if (a.start_coordinate) detail += ` from [${a.start_coordinate}]`;
+            if (a.duration !== undefined) detail += ` ${a.duration}s`;
+            if (a.region) detail += ` region [${a.region}]`;
+            return `  ${i + 1}. ${detail}`;
+          });
+          let header = `Macro '${name}' — DRY RUN preview (${macroActions.length} actions)`;
+          if (repeatCount > 1) header += ` × ${repeatCount} repetitions`;
+          if (playbackSpeed !== 1.0) header += ` at ${playbackSpeed}x speed`;
+          if (macroData.description) header += `\nDescription: ${macroData.description}`;
+          return { content: [{ type: "text", text: `${header}\n\nActions:\n${lines.join("\n")}` }] };
         }
 
         const repeatCount = Math.max(1, Math.min(repeat || 1, 100));
