@@ -1505,4 +1505,74 @@ Verified across 6 resolutions:
 - [ ] Clipboard paste verification (ensure content actually arrived)
 - [ ] Macro: add "edit" mode to modify existing macros
 - [ ] Research: check Anthropic reference computer.py for new actions/params
-- [ ] text_editor tool (Anthropic spec: str_replace_based_edit_tool)
+- [x] text_editor tool (Anthropic spec: str_replace_based_edit_tool) → ✅ cycle 30
+
+---
+
+## Cycle 30 (2026-03-08)
+
+### New Tool: `computer_text_editor` (Anthropic str_replace_based_edit_tool spec)
+
+Implements the `text_editor_20250728` specification as an MCP tool for editing files inside containers.
+
+**Commands:**
+| Command | Description | Key Params |
+|---------|------------|------------|
+| `view` | View file with `cat -n` line numbers, or directory listing | `view_range=[start,end]` |
+| `create` | Create new file (fails if exists) | `file_text` |
+| `str_replace` | Replace unique text occurrence | `old_str`, `new_str` |
+| `insert` | Insert text at line number | `insert_line`, `insert_text` |
+| `undo_edit` | Revert last edit (bonus over spec) | — |
+
+**Spec Compliance:**
+- `cat -n` style output with 6-char right-aligned line numbers
+- Tab expansion (tabs → 4 spaces)
+- SNIPPET_LINES = 4 context around edits
+- str_replace requires exactly 1 occurrence (reports line numbers on duplicates)
+- Path validation: absolute required, exists check, directory restrictions
+- `view_range` with `end=-1` for EOF support
+- `insert_line=0` for prepend support
+- Accepts both `insert_text` (20250728 spec) and `new_str` (older compat) for insert
+
+**Bonus Features:**
+- `undo_edit` command with in-memory file history (per container, per path)
+- File I/O via base64 encoding for shell safety
+- Multi-container support (optional `container_name` param)
+
+**Implementation Details:**
+- `fileEditHistory` Map: `"containerName::path"` → `string[]` (previous contents)
+- `makeNumberedOutput()` helper for `cat -n` style formatting
+- All file operations via `dockerExec()` (read: `cat`, write: base64 encode/decode)
+- Truncation at MAX_RESPONSE_LEN (16KB) for large files
+
+### Anthropic Spec Research Summary
+- Tool versions: `text_editor_20250728` (latest, Claude 4.x), `text_editor_20250429`, `text_editor_20250124` (Claude 3.7), `text_editor_20241022` (Claude 3.5)
+- Latest version removed `undo_edit`, renamed tool to `str_replace_based_edit_tool`, uses `insert_text` instead of `new_str`
+- Optional `max_characters` param in 20250728 for truncation control
+- ~700 additional input tokens when included in API requests
+
+### Real-World Dogfooding
+- Created `/workspace/system_report.py` using text_editor create command
+- Ran system report via computer_bash — all tools present, container healthy
+- Also browsed Anthropic reference implementation in Firefox (edit.py on GitHub)
+
+### Verification Results
+- **sc-118**: view file + directory listing ✅
+- **sc-119**: create + str_replace + undo_edit ✅
+- **sc-120**: insert at line 2 with snippet context ✅
+- **sc-121**: error cases (non-absolute path, missing file, existing file, duplicate old_str) ✅
+
+### Commits
+1. `feaad45` — feat: add computer_text_editor tool (Anthropic str_replace_based_edit_tool spec)
+
+### Code Stats
+- MCP server: ~3700 lines (up from ~3445)
+- 34 MCP tools (up from 33)
+- Server version: 1.23.0
+
+### Next Steps
+- [ ] Terminal detection improvements (more shell/emulator patterns)
+- [ ] Clipboard paste verification (ensure content actually arrived)
+- [ ] Macro: add "edit" mode to modify existing macros
+- [ ] `max_characters` param for text_editor view truncation (20250728 spec)
+- [ ] text_editor view_range with end=-1 edge case testing
