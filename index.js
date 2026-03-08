@@ -5562,53 +5562,32 @@ server.tool(
           keepTab = result.tabs.find(t => t.active) || result.tabs[0];
         }
 
-        const closeCount = result.tabs.length - 1;
+        const expectedClose = result.tabs.length - 1;
+        const keepTitle = keepTab.title;
 
-        // Use Firefox's native "Close Other Tabs" context menu — much more reliable
-        // than clicking individual tabs (which shift/resize after each close)
-        clickTab(keepTab);
-        await new Promise(r => setTimeout(r, 300));
-
-        // Right-click the keep tab to open context menu
-        const displayX = keepTab.bbox.x + Math.round(keepTab.bbox.width / 2);
-        const displayY = keepTab.bbox.y + Math.round(keepTab.bbox.height / 2);
-        xdotool(`mousemove ${displayX} ${displayY} click 3`, cn);
-        await new Promise(r => setTimeout(r, 500));
-
-        // Click "Close Other Tabs" via a11y menu item
-        const menuQ = queryA11yFlat({ role: "menu item", name: "Close Other Tabs", container_name: cn });
-        if (menuQ.error || menuQ.matches.length === 0) {
-          // Fallback: try "Close Multiple Tabs" submenu first
-          const subQ = queryA11yFlat({ role: "menu item", name: "Close Multiple Tabs", container_name: cn });
-          if (!subQ.error && subQ.matches.length > 0) {
-            const sub = subQ.matches[0];
-            const sx = sub.bbox.x + Math.round(sub.bbox.width / 2);
-            const sy = sub.bbox.y + Math.round(sub.bbox.height / 2);
-            xdotool(`mousemove ${sx} ${sy}`, cn);
-            await new Promise(r => setTimeout(r, 400));
-            const otherQ = queryA11yFlat({ role: "menu item", name: "Close Other Tabs", container_name: cn });
-            if (!otherQ.error && otherQ.matches.length > 0) {
-              const other = otherQ.matches[0];
-              const ox = other.bbox.x + Math.round(other.bbox.width / 2);
-              const oy = other.bbox.y + Math.round(other.bbox.height / 2);
-              xdotool(`mousemove ${ox} ${oy} click 1`, cn);
-            } else {
-              xdotool("key Escape", cn);
-              return { content: [{ type: "text", text: "Error: Could not find 'Close Other Tabs' in context menu" }], isError: true };
-            }
-          } else {
-            xdotool("key Escape", cn);
-            return { content: [{ type: "text", text: "Error: Could not find tab context menu items" }], isError: true };
-          }
-        } else {
-          // Direct "Close Other Tabs" menu item (some Firefox versions)
-          const item = menuQ.matches[0];
-          const ix = item.bbox.x + Math.round(item.bbox.width / 2);
-          const iy = item.bbox.y + Math.round(item.bbox.height / 2);
-          xdotool(`mousemove ${ix} ${iy} click 1`, cn);
+        // Re-query tabs before each close to get fresh coordinates
+        // (tabs resize/shift after each close, making stale coords unreliable)
+        let closed = 0;
+        for (let attempt = 0; attempt < expectedClose + 3; attempt++) {
+          const fresh = getBrowserTabs();
+          if (fresh.error || fresh.tabs.length <= 1) break;
+          // Find a tab that isn't the keep tab (match by title)
+          const victim = fresh.tabs.find(t => t.title !== keepTitle);
+          if (!victim) break;
+          clickTab(victim);
+          await new Promise(r => setTimeout(r, 200));
+          xdotool("key ctrl+w", cn);
+          await new Promise(r => setTimeout(r, 300));
+          closed++;
         }
 
-        await new Promise(r => setTimeout(r, 500));
+        // Ensure keep tab is active
+        const finalTabs = getBrowserTabs();
+        if (!finalTabs.error && finalTabs.tabs.length > 0) {
+          const keep = finalTabs.tabs.find(t => t.title === keepTitle) || finalTabs.tabs[0];
+          clickTab(keep);
+          await new Promise(r => setTimeout(r, 200));
+        }
 
         // Move mouse to center to avoid tooltip
         const tabApi = getApiDimensions(cn);
@@ -5617,10 +5596,11 @@ server.tool(
         await new Promise(r => setTimeout(r, SCREENSHOT_DELAY_MS));
         const ss = takeScreenshot(cn);
 
+        const remaining = finalTabs.error ? "?" : finalTabs.tabs.length;
         return {
           content: [
             { type: "image", data: ss.data, mimeType: ss.mimeType },
-            { type: "text", text: `Closed ${closeCount} tab(s), kept "${keepTab.title || "unknown"}". 1 tab remaining.` }
+            { type: "text", text: `Closed ${closed} tab(s), kept "${keepTitle}". ${remaining} tab(s) remaining.` }
           ]
         };
       }
