@@ -5046,6 +5046,14 @@ function queryA11yFlat({ role, name, app, window_title, container_name, depth = 
     return true;
   });
 
+  // Sort: prefer "showing" elements first (Firefox a11y tree sometimes has duplicate
+  // entries for the same element — one without "showing" may have stale state)
+  matches.sort((a, b) => {
+    const aShowing = (a.states || []).includes("showing") ? 0 : 1;
+    const bShowing = (b.states || []).includes("showing") ? 0 : 1;
+    return aShowing - bShowing;
+  });
+
   return { matches, totalNodes: nodes.length, cn };
 }
 
@@ -5525,13 +5533,20 @@ server.tool(
         const matchRole = elem.role ? elem.role.toLowerCase() : null;
         const matchName = elem.name ? elem.name.toLowerCase() : null;
 
-        // Find matching nodes
+        // Find matching nodes (allNodes already sorted with "showing" first from queryA11yFlat)
         const elemMatches = allNodes.filter(node => {
           const nodeRole = (node.role || "").toLowerCase();
           const nodeName = (node.name || "").toLowerCase();
           if (matchRole && !nodeRole.includes(matchRole)) return false;
           if (matchName && !nodeName.includes(matchName)) return false;
           return true;
+        });
+
+        // Re-sort: prefer "showing" elements (correct state) over non-showing duplicates
+        elemMatches.sort((a, b) => {
+          const aShowing = (a.states || []).includes("showing") ? 0 : 1;
+          const bShowing = (b.states || []).includes("showing") ? 0 : 1;
+          return aShowing - bShowing;
         });
 
         if (elemMatches.length === 0) {
