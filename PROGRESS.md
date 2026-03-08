@@ -2066,6 +2066,49 @@ Browser tab management using AT-SPI2 accessibility tree. 4 actions: list, switch
 
 ### Next Steps
 - [ ] Performance: reduce screenshot latency on high-frequency operations
-- [ ] A11y-driven form automation (fill multiple fields in one call)
+- [x] A11y-driven form automation (fill multiple fields in one call) → done in cycle 44
 - [ ] A11y-driven scroll (scroll within specific elements, not just the viewport)
 - [ ] Monitor for Anthropic API updates (next check in ~3 cycles)
+
+## Cycle 44 (2026-03-08)
+
+### New Features
+
+#### computer_a11y_fill (Tool #47)
+Fill multiple form fields in one call using AT-SPI2 accessibility tree. Single tree query, sequential field fills.
+
+- **fields**: Array of `{name, role, text, clear_first, index}` specs (1–20 fields)
+- **tab_between**: Optional Tab key navigation between fields (faster when tab order matches)
+- **submit**: Optional Enter press after the last field (for form submission)
+- **app/window_title**: Filter to specific application or window
+- Tested on httpbin.org/forms/post: filled Customer name, Telephone, E-mail in one call ✓
+
+#### computer_tabs URL-all mode
+Enhanced `computer_tabs list` to read URLs for ALL tabs, not just the active one.
+
+- **include_url_mode="all"**: Switches to each tab, reads URL bar, switches back to original
+- **include_url_mode="active"** (default): Fast path, only reads active tab URL
+- Fixed bug where active tab got wrong URL (skipped click for originally-active tab)
+- Tested: 5 tabs all returned correct URLs ✓
+
+### Bug Fixes
+- **tabs URL-all active tab bug**: When reading all tab URLs, the originally-active tab wasn't clicked before reading its URL bar. By that point we'd switched to another tab, so it read the wrong URL. Fix: always click each tab regardless of initial active state.
+
+### Real-World Dogfooding
+- Filled 3 form fields on httpbin.org/forms/post in one a11y_fill call
+- Read URLs for all 5 browser tabs — all correct
+
+### Commits
+1. `38b069d` — feat: add computer_a11y_fill tool, enhance tabs URL listing
+2. `4e6a2a8` — fix: tabs URL-all mode reads wrong URL for active tab
+
+### Code Stats
+- MCP server: ~5650 lines (up from ~5500)
+- 47 MCP tools (up from 46)
+- Server version: 1.37.0
+
+### Next Steps
+- [ ] Performance: reduce screenshot latency on high-frequency operations
+- [ ] A11y-driven scroll (scroll within specific elements, not just the viewport)
+- [ ] Test a11y_fill with tab_between=true and submit=true modes
+- [ ] Monitor for Anthropic API updates (next check in ~2 cycles)
