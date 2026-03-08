@@ -5484,6 +5484,181 @@ server.tool(
   }
 );
 
+// ── computer_a11y_select ─────────────────────────────────────────
+server.tool(
+  "computer_a11y_select",
+  "Select, check, or toggle UI elements by accessibility role/name. Handles checkboxes (with desired state), radio buttons, toggle buttons, and combo box option selection — all in one batch call. Single a11y tree query. Smarter than a11y_click: checks current state before toggling, supports desired state for checkboxes, and handles combo box expand→option flow.",
+  {
+    elements: z.array(z.object({
+      role: z.string().optional().describe("Accessibility role: 'check box', 'radio button', 'toggle button', 'combo box'. Defaults to auto-detect if omitted."),
+      name: z.string().optional().describe("Element name/label (substring, case-insensitive). E.g. 'Bacon', 'Large', 'Country'"),
+      value: z.string().optional().describe("For combo boxes: option text to select. For checkboxes/toggles: 'checked' or 'unchecked' to set desired state (omit to toggle)."),
+      index: z.number().optional().describe("If multiple elements match, target the Nth one (0-based, default 0)"),
+    })).min(1).max(20).describe("Array of elements to select/toggle. Each needs at least 'name' or 'role'."),
+    app: z.string().optional().describe("Filter by application name (e.g. 'Firefox')"),
+    window_title: z.string().optional().describe("Filter by window title substring"),
+    container_name: z.string().optional().describe("Target container (default: primary)"),
+  },
+  async ({ elements, app, window_title, container_name }) => {
+    const cn = container_name || DEFAULT_CONTAINER;
+    try {
+      // Validate elements
+      for (let i = 0; i < elements.length; i++) {
+        if (!elements[i].name && !elements[i].role) {
+          return { content: [{ type: "text", text: `Error: element[${i}] must have at least 'name' or 'role'` }], isError: true };
+        }
+      }
+
+      // Query full a11y tree once
+      const q = queryA11yFlat({ role: null, name: null, app, window_title, container_name: cn });
+      if (q.error) return { content: [{ type: "text", text: q.error }], isError: true };
+
+      const allNodes = q.matches;
+      const results = [];
+      const env = environments.get(cn);
+      const dispW = env?.width || DISPLAY_WIDTH;
+      const dispH = env?.height || DISPLAY_HEIGHT;
+      const scaleFactor = getScaleFactor(dispW, dispH);
+
+      for (let ei = 0; ei < elements.length; ei++) {
+        const elem = elements[ei];
+        const matchRole = elem.role ? elem.role.toLowerCase() : null;
+        const matchName = elem.name ? elem.name.toLowerCase() : null;
+
+        // Find matching nodes
+        const elemMatches = allNodes.filter(node => {
+          const nodeRole = (node.role || "").toLowerCase();
+          const nodeName = (node.name || "").toLowerCase();
+          if (matchRole && !nodeRole.includes(matchRole)) return false;
+          if (matchName && !nodeName.includes(matchName)) return false;
+          return true;
+        });
+
+        if (elemMatches.length === 0) {
+          const desc = [elem.role && `role="${elem.role}"`, elem.name && `name="${elem.name}"`].filter(Boolean).join(", ");
+          results.push({ idx: ei, status: "not_found", desc });
+          continue;
+        }
+
+        const targetIdx = Math.min(elem.index || 0, elemMatches.length - 1);
+        const target = elemMatches[targetIdx];
+        const nodeRole = (target.role || "").toLowerCase();
+        const states = target.states || [];
+        const isChecked = states.includes("checked");
+
+        // Determine if this is a combo box
+        const isComboBox = nodeRole.includes("combo box") || nodeRole.includes("combo_box");
+        // Determine if this is a checkbox or toggle (can be toggled)
+        const isToggleable = nodeRole.includes("check box") || nodeRole.includes("check_box") ||
+                             nodeRole.includes("toggle button") || nodeRole.includes("toggle_button");
+        // Radio button
+        const isRadio = nodeRole.includes("radio button") || nodeRole.includes("radio_button");
+
+        const displayX = target.bbox.x + Math.round(target.bbox.width / 2);
+        const displayY = target.bbox.y + Math.round(target.bbox.height / 2);
+        const apiX = Math.round(displayX * scaleFactor);
+        const apiY = Math.round(displayY * scaleFactor);
+
+        if (isComboBox && elem.value) {
+          // Combo box: click to expand, then find and click the option
+          xdotool(`mousemove ${displayX} ${displayY} click 1`, cn);
+          await new Promise(r => setTimeout(r, 500));
+
+          // Re-query tree to find the expanded options (menu items, list items)
+          const optQ = queryA11yFlat({ role: null, name: elem.value, app, window_title, container_name: cn });
+          if (optQ.error || optQ.matches.length === 0) {
+            // Try matching among menu items and list items specifically
+            const optQ2 = queryA11yFlat({ role: null, name: null, app, window_title, container_name: cn });
+            const optName = elem.value.toLowerCase();
+            const optMatches = (optQ2.matches || []).filter(n => {
+              const r = (n.role || "").toLowerCase();
+              const nm = (n.name || "").toLowerCase();
+              return (r.includes("menu item") || r.includes("list item") || r.includes("option")) && nm.includes(optName);
+            });
+            if (optMatches.length === 0) {
+              // Close the dropdown by pressing Escape
+              xdotool("key Escape", cn);
+              results.push({ idx: ei, status: "option_not_found", target: `${target.role} "${target.name}"`, option: elem.value });
+              continue;
+            }
+            const opt = optMatches[0];
+            const optX = opt.bbox.x + Math.round(opt.bbox.width / 2);
+            const optY = opt.bbox.y + Math.round(opt.bbox.height / 2);
+            xdotool(`mousemove ${optX} ${optY} click 1`, cn);
+          } else {
+            // Click the first match for the option
+            const opt = optQ.matches[0];
+            const optX = opt.bbox.x + Math.round(opt.bbox.width / 2);
+            const optY = opt.bbox.y + Math.round(opt.bbox.height / 2);
+            xdotool(`mousemove ${optX} ${optY} click 1`, cn);
+          }
+          await new Promise(r => setTimeout(r, 300));
+          results.push({ idx: ei, status: "selected", target: `${target.role} "${target.name}"`, option: elem.value, at: `[${apiX}, ${apiY}]` });
+
+        } else if (isToggleable) {
+          // Checkbox / toggle button: check desired state
+          const desiredState = elem.value ? elem.value.toLowerCase() : null;
+          if (desiredState === "checked" && isChecked) {
+            results.push({ idx: ei, status: "already_checked", target: `${target.role} "${target.name}"`, at: `[${apiX}, ${apiY}]` });
+          } else if (desiredState === "unchecked" && !isChecked) {
+            results.push({ idx: ei, status: "already_unchecked", target: `${target.role} "${target.name}"`, at: `[${apiX}, ${apiY}]` });
+          } else {
+            // Click to toggle
+            xdotool(`mousemove ${displayX} ${displayY} click 1`, cn);
+            await new Promise(r => setTimeout(r, 200));
+            const newState = isChecked ? "unchecked" : "checked";
+            results.push({ idx: ei, status: newState, target: `${target.role} "${target.name}"`, at: `[${apiX}, ${apiY}]` });
+          }
+
+        } else if (isRadio) {
+          // Radio button: click to select (no toggle — radio buttons are one-way)
+          if (isChecked) {
+            results.push({ idx: ei, status: "already_selected", target: `${target.role} "${target.name}"`, at: `[${apiX}, ${apiY}]` });
+          } else {
+            xdotool(`mousemove ${displayX} ${displayY} click 1`, cn);
+            await new Promise(r => setTimeout(r, 200));
+            results.push({ idx: ei, status: "selected", target: `${target.role} "${target.name}"`, at: `[${apiX}, ${apiY}]` });
+          }
+
+        } else {
+          // Generic fallback: just click it
+          xdotool(`mousemove ${displayX} ${displayY} click 1`, cn);
+          await new Promise(r => setTimeout(r, 200));
+          results.push({ idx: ei, status: "clicked", target: `${target.role} "${target.name}"`, at: `[${apiX}, ${apiY}]` });
+        }
+
+        // Small delay between elements
+        if (ei < elements.length - 1) {
+          await new Promise(r => setTimeout(r, 150));
+        }
+      }
+
+      // Final screenshot
+      await new Promise(r => setTimeout(r, SCREENSHOT_DELAY_MS));
+      const ss = takeScreenshot(cn);
+
+      const acted = results.filter(r => !r.status.includes("not_found")).length;
+      const notFound = results.filter(r => r.status === "not_found").length;
+      const summary = results.map(r => {
+        if (r.status === "not_found") return `  ✗ [${r.idx}] ${r.desc} — not found`;
+        if (r.status === "option_not_found") return `  ✗ [${r.idx}] ${r.target} — option "${r.option}" not found`;
+        const icon = r.status.startsWith("already") ? "○" : "✓";
+        const optInfo = r.option ? ` → "${r.option}"` : "";
+        return `  ${icon} [${r.idx}] ${r.target} — ${r.status}${optInfo} at ${r.at}`;
+      }).join("\n");
+
+      return {
+        content: [
+          { type: "image", data: ss.data, mimeType: ss.mimeType },
+          { type: "text", text: `Selected ${acted}/${elements.length} element(s)${notFound > 0 ? ` (${notFound} not found)` : ""}:\n${summary}` }
+        ]
+      };
+    } catch (err) {
+      return { content: [{ type: "text", text: `A11y select error: ${err.message}` }], isError: true };
+    }
+  }
+);
+
 // ── computer_a11y_fill ──────────────────────────────────────────
 server.tool(
   "computer_a11y_fill",
