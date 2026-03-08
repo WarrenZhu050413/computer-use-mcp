@@ -4476,5 +4476,119 @@ Max 50 actions per batch. Stops on first error unless continue_on_error is true.
   }
 );
 
+// === Content Extraction ===
+
+server.tool(
+  "computer_scrape",
+  "Extract text content from the focused window by selecting all and copying to clipboard. Much faster and more accurate than OCR for browser pages, text editors, and terminals. Returns the text content plus a screenshot.",
+  {
+    method: z.enum(["select_all", "visible"]).optional().describe("Extraction method: 'select_all' (Ctrl+A, Ctrl+C — gets full page text, default) or 'visible' (just copies current selection if any)"),
+    container_name: z.string().optional().describe("Target container (default: primary)"),
+  },
+  async ({ method, container_name }) => {
+    const cn = container_name || DEFAULT_CONTAINER;
+    try {
+      // Save original clipboard
+      let originalClipboard = "";
+      try {
+        originalClipboard = dockerExec(`xclip -selection clipboard -o 2>/dev/null || true`, 5000, cn).toString();
+      } catch {}
+
+      if (method !== "visible") {
+        // Select all + copy
+        xdotool("key ctrl+a", cn);
+        execFileSync("sleep", ["0.3"]);
+        xdotool("key ctrl+c", cn);
+        execFileSync("sleep", ["0.3"]);
+        // Deselect to avoid visual artifacts (click at 0,0 or press Escape may be too disruptive)
+        // Just press Right arrow to deselect without moving cursor much
+        xdotool("key Right", cn);
+      } else {
+        // Just copy current selection
+        xdotool("key ctrl+c", cn);
+        execFileSync("sleep", ["0.3"]);
+      }
+
+      // Read clipboard content
+      let text = "";
+      try {
+        text = dockerExec(`xclip -selection clipboard -o 2>/dev/null || echo ""`, 30000, cn).toString();
+      } catch (err) {
+        text = `(clipboard read failed: ${err.message})`;
+      }
+
+      // Restore original clipboard in background
+      if (originalClipboard && originalClipboard !== text) {
+        const b64Orig = Buffer.from(originalClipboard).toString("base64");
+        const id = randomUUID().slice(0, 8);
+        const origPath = `/tmp/_cp_scrape_${id}.txt`;
+        try {
+          dockerExec(`nohup bash -c 'sleep 1 && echo '"'"'${b64Orig}'"'"' | base64 -d > '"'"'${origPath}'"'"' && cat '"'"'${origPath}'"'"' | xclip -selection clipboard -i && rm -f '"'"'${origPath}'"'"'' >/dev/null 2>&1 &`, 5000, cn);
+        } catch {}
+      }
+
+      // Take screenshot
+      const ss = takeScreenshot(cn);
+
+      // Truncate if too long
+      const maxLen = MAX_RESPONSE_LEN;
+      const truncated = text.length > maxLen;
+      const displayText = truncated ? text.slice(0, maxLen) + `\n\n[... truncated, ${text.length} chars total]` : text;
+
+      return {
+        content: [
+          { type: "image", data: ss.data, mimeType: ss.mimeType },
+          { type: "text", text: displayText || "(no text extracted)" }
+        ]
+      };
+    } catch (err) {
+      return { content: [{ type: "text", text: `Scrape error: ${err.message}` }], isError: true };
+    }
+  }
+);
+
+// === Desktop Notifications ===
+
+server.tool(
+  "computer_notify",
+  "Display a desktop notification inside the container using notify-send. Useful for signaling status to VNC observers or testing notification flows.",
+  {
+    title: z.string().describe("Notification title"),
+    body: z.string().optional().describe("Notification body text"),
+    urgency: z.enum(["low", "normal", "critical"]).optional().describe("Urgency level (default: normal)"),
+    icon: z.string().optional().describe("Icon name or path (default: dialog-information)"),
+    timeout_ms: z.number().optional().describe("Auto-dismiss timeout in ms (default: 5000)"),
+    container_name: z.string().optional().describe("Target container (default: primary)"),
+  },
+  async ({ title, body, urgency, icon, timeout_ms, container_name }) => {
+    const cn = container_name || DEFAULT_CONTAINER;
+    try {
+      const args = ["notify-send"];
+      if (urgency) args.push(`--urgency=${urgency}`);
+      if (icon) args.push(`--icon=${icon}`);
+      else args.push("--icon=dialog-information");
+      if (timeout_ms !== undefined) args.push(`--expire-time=${timeout_ms}`);
+      else args.push("--expire-time=5000");
+      args.push(`'${title.replace(/'/g, "'\\''")}'`);
+      if (body) args.push(`'${body.replace(/'/g, "'\\''")}'`);
+
+      dockerExec(args.join(" "), 10000, cn);
+
+      // Take screenshot to show the notification
+      execFileSync("sleep", ["0.5"]);
+      const ss = takeScreenshot(cn);
+
+      return {
+        content: [
+          { type: "image", data: ss.data, mimeType: ss.mimeType },
+          { type: "text", text: `Notification sent: "${title}"${body ? ` — ${body}` : ""}` }
+        ]
+      };
+    } catch (err) {
+      return { content: [{ type: "text", text: `Notify error: ${err.message}` }], isError: true };
+    }
+  }
+);
+
 const transport = new StdioServerTransport();
 await server.connect(transport);
