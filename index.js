@@ -17,8 +17,8 @@ const DISPLAY_WIDTH = parseInt(process.env.DISPLAY_WIDTH || "1024", 10);
 const DISPLAY_HEIGHT = parseInt(process.env.DISPLAY_HEIGHT || "768", 10);
 const SCREENSHOT_DELAY_MS = parseInt(process.env.SCREENSHOT_DELAY_MS || "1000", 10);
 // Adaptive screenshot delays — proportional to SCREENSHOT_DELAY_MS
-const DELAY_FAST = Math.max(100, Math.round(SCREENSHOT_DELAY_MS * 0.2));   // 200ms — cursor moves, mouse down/up
-const DELAY_MEDIUM = Math.max(200, Math.round(SCREENSHOT_DELAY_MS * 0.5)); // 500ms — clicks, keys, scrolls, window ops
+const DELAY_FAST = Math.min(SCREENSHOT_DELAY_MS, Math.max(100, Math.round(SCREENSHOT_DELAY_MS * 0.2)));   // 200ms — cursor moves, mouse down/up
+const DELAY_MEDIUM = Math.min(SCREENSHOT_DELAY_MS, Math.max(200, Math.round(SCREENSHOT_DELAY_MS * 0.5))); // 500ms — clicks, keys, scrolls, window ops
 const DELAY_FULL = SCREENSHOT_DELAY_MS;                                      // 1000ms — type, drag, heavy rendering
 const SCREENSHOT_FORMAT = (process.env.SCREENSHOT_FORMAT || "jpeg").toLowerCase();
 const SCREENSHOT_QUALITY = parseInt(process.env.SCREENSHOT_QUALITY || "80", 10);
