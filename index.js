@@ -427,7 +427,7 @@ function executeAction({ action, coordinate, text, scroll_direction, scroll_amou
 
 const server = new McpServer({
   name: "computer-use",
-  version: "1.10.0",
+  version: "1.11.0",
 });
 
 const actionSchema = {
@@ -1796,6 +1796,234 @@ zoom (zoom_in/zoom_out/zoom_reset).`,
         content: [{ type: "text", text: `Error executing shortcut '${shortcutName}': ${err.message}` }],
         isError: true
       };
+    }
+  }
+);
+
+// === OCR Tools ===
+
+server.tool(
+  "computer_ocr",
+  `Extract text from the screen using OCR (tesseract). Returns all recognized text.
+Use region to OCR only a portion of the screen. Supports English and Chinese (simplified).`,
+  {
+    region: z.array(z.number()).length(4).optional().describe("[x1, y1, x2, y2] region to OCR (API coordinates). Omit for full screen."),
+    language: z.string().optional().describe("Tesseract language code (default: 'eng'). Use 'eng+chi_sim' for English + Chinese."),
+    container_name: z.string().optional().describe("Target container (default: primary)"),
+  },
+  async ({ region, language, container_name }) => {
+    try {
+      const cn = resolveContainer(container_name);
+      const lang = language || "eng";
+      const id = randomUUID().slice(0, 8);
+      const pngPath = `/tmp/_ocr_${id}.png`;
+
+      // Capture screenshot
+      dockerExec(`scrot -o ${pngPath}`, 30000, cn);
+
+      // Crop to region if specified
+      let ocrInput = pngPath;
+      if (region) {
+        const [x1, y1, x2, y2] = region;
+        // Convert API coordinates to display coordinates
+        const [dx1, dy1] = apiToDisplay(x1, y1, cn);
+        const [dx2, dy2] = apiToDisplay(x2, y2, cn);
+        const w = dx2 - dx1;
+        const h = dy2 - dy1;
+        if (w <= 0 || h <= 0) {
+          return { content: [{ type: "text", text: "Invalid region: width and height must be positive" }], isError: true };
+        }
+        const cropPath = `/tmp/_ocr_${id}_crop.png`;
+        dockerExec(`convert ${pngPath} -crop ${w}x${h}+${dx1}+${dy1} +repage ${cropPath}`, 30000, cn);
+        ocrInput = cropPath;
+      }
+
+      // Run tesseract OCR
+      const outBase = `/tmp/_ocr_${id}_out`;
+      dockerExec(`tesseract ${ocrInput} ${outBase} -l ${lang} --psm 3 2>/dev/null`, 60000, cn);
+      const text = dockerExec(`cat ${outBase}.txt && rm -f /tmp/_ocr_${id}*`, 10000, cn).toString().trim();
+
+      // Also return screenshot for context
+      const ss = takeScreenshot(cn);
+      return {
+        content: [
+          { type: "image", data: ss.data, mimeType: ss.mimeType },
+          { type: "text", text: text || "(no text detected)" }
+        ]
+      };
+    } catch (err) {
+      return { content: [{ type: "text", text: `OCR error: ${err.message}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  "computer_find_text",
+  `Find text on the screen and return its coordinates. Uses OCR to locate text matches.
+Returns the center coordinate of each match in API space — ready for clicking.
+Useful for: finding buttons, labels, links, or any visible text element.`,
+  {
+    query: z.string().describe("Text to search for (case-insensitive substring match)"),
+    region: z.array(z.number()).length(4).optional().describe("[x1, y1, x2, y2] region to search within (API coordinates). Omit for full screen."),
+    language: z.string().optional().describe("Tesseract language code (default: 'eng'). Use 'eng+chi_sim' for English + Chinese."),
+    all_matches: z.boolean().optional().describe("Return all matches (default: true). Set false for first match only."),
+    container_name: z.string().optional().describe("Target container (default: primary)"),
+  },
+  async ({ query, region, language, all_matches, container_name }) => {
+    try {
+      const cn = resolveContainer(container_name);
+      const lang = language || "eng";
+      const returnAll = all_matches !== false;
+      const id = randomUUID().slice(0, 8);
+      const pngPath = `/tmp/_find_${id}.png`;
+
+      // Capture screenshot
+      dockerExec(`scrot -o ${pngPath}`, 30000, cn);
+
+      // Region offset (for converting back to full-screen coords)
+      let regionOffsetX = 0, regionOffsetY = 0;
+      let ocrInput = pngPath;
+
+      if (region) {
+        const [x1, y1, x2, y2] = region;
+        const [dx1, dy1] = apiToDisplay(x1, y1, cn);
+        const [dx2, dy2] = apiToDisplay(x2, y2, cn);
+        const w = dx2 - dx1;
+        const h = dy2 - dy1;
+        if (w <= 0 || h <= 0) {
+          return { content: [{ type: "text", text: "Invalid region: width and height must be positive" }], isError: true };
+        }
+        const cropPath = `/tmp/_find_${id}_crop.png`;
+        dockerExec(`convert ${pngPath} -crop ${w}x${h}+${dx1}+${dy1} +repage ${cropPath}`, 30000, cn);
+        ocrInput = cropPath;
+        regionOffsetX = dx1;
+        regionOffsetY = dy1;
+      }
+
+      // Run tesseract with TSV output (gives bounding boxes)
+      const outBase = `/tmp/_find_${id}_out`;
+      dockerExec(`tesseract ${ocrInput} ${outBase} -l ${lang} --psm 3 tsv 2>/dev/null`, 60000, cn);
+      const tsv = dockerExec(`cat ${outBase}.tsv && rm -f /tmp/_find_${id}*`, 10000, cn).toString();
+
+      // Parse TSV — find matching words
+      const lines = tsv.split("\n").slice(1); // skip header
+      const queryLower = query.toLowerCase();
+      const matches = [];
+
+      // First pass: collect all words with positions (level 5 = word)
+      const words = [];
+      for (const line of lines) {
+        const cols = line.split("\t");
+        if (cols.length < 12) continue;
+        const level = parseInt(cols[0]);
+        if (level !== 5) continue;
+        const conf = parseFloat(cols[10]);
+        const text = cols[11]?.trim();
+        if (!text || conf < 0) continue;
+        words.push({
+          text,
+          left: parseInt(cols[6]),
+          top: parseInt(cols[7]),
+          width: parseInt(cols[8]),
+          height: parseInt(cols[9]),
+          conf,
+          lineNum: parseInt(cols[4]),
+          blockNum: parseInt(cols[2]),
+          parNum: parseInt(cols[3]),
+        });
+      }
+
+      // Multi-word matching: try to find query as consecutive words on same line
+      const queryWords = queryLower.split(/\s+/).filter(w => w.length > 0);
+
+      if (queryWords.length === 1) {
+        // Single word: substring match against each word
+        for (const w of words) {
+          if (w.text.toLowerCase().includes(queryLower)) {
+            const displayCenterX = w.left + regionOffsetX + Math.round(w.width / 2);
+            const displayCenterY = w.top + regionOffsetY + Math.round(w.height / 2);
+            // Convert display coords to API coords
+            const env = environments.get(cn);
+            const dw = env?.width || DISPLAY_WIDTH;
+            const dh = env?.height || DISPLAY_HEIGHT;
+            const s = getScaleFactor(dw, dh);
+            const apiX = Math.round(displayCenterX * s);
+            const apiY = Math.round(displayCenterY * s);
+            matches.push({
+              text: w.text,
+              coordinate: [apiX, apiY],
+              confidence: Math.round(w.conf),
+              bounds: { left: Math.round((w.left + regionOffsetX) * s), top: Math.round((w.top + regionOffsetY) * s), width: Math.round(w.width * s), height: Math.round(w.height * s) }
+            });
+            if (!returnAll) break;
+          }
+        }
+      } else {
+        // Multi-word: find consecutive words on same line that match
+        for (let i = 0; i <= words.length - queryWords.length; i++) {
+          let match = true;
+          for (let j = 0; j < queryWords.length; j++) {
+            const w = words[i + j];
+            if (!w.text.toLowerCase().includes(queryWords[j])) { match = false; break; }
+            // Check same line (same block + par + line)
+            if (j > 0) {
+              const prev = words[i + j - 1];
+              if (w.lineNum !== prev.lineNum || w.blockNum !== prev.blockNum || w.parNum !== prev.parNum) {
+                match = false; break;
+              }
+            }
+          }
+          if (match) {
+            // Compute bounding box spanning all matched words
+            const first = words[i];
+            const last = words[i + queryWords.length - 1];
+            const spanLeft = first.left + regionOffsetX;
+            const spanTop = Math.min(first.top, last.top) + regionOffsetY;
+            const spanRight = last.left + last.width + regionOffsetX;
+            const spanBottom = Math.max(first.top + first.height, last.top + last.height) + regionOffsetY;
+            const displayCenterX = Math.round((spanLeft + spanRight) / 2);
+            const displayCenterY = Math.round((spanTop + spanBottom) / 2);
+            const env = environments.get(cn);
+            const dw = env?.width || DISPLAY_WIDTH;
+            const dh = env?.height || DISPLAY_HEIGHT;
+            const s = getScaleFactor(dw, dh);
+            const apiX = Math.round(displayCenterX * s);
+            const apiY = Math.round(displayCenterY * s);
+            const matchedText = words.slice(i, i + queryWords.length).map(w => w.text).join(" ");
+            matches.push({
+              text: matchedText,
+              coordinate: [apiX, apiY],
+              confidence: Math.round(Math.min(...words.slice(i, i + queryWords.length).map(w => w.conf))),
+              bounds: { left: Math.round(spanLeft * s), top: Math.round(spanTop * s), width: Math.round((spanRight - spanLeft) * s), height: Math.round((spanBottom - spanTop) * s) }
+            });
+            if (!returnAll) break;
+          }
+        }
+      }
+
+      // Return results with screenshot
+      const ss = takeScreenshot(cn);
+      if (matches.length === 0) {
+        return {
+          content: [
+            { type: "image", data: ss.data, mimeType: ss.mimeType },
+            { type: "text", text: `No matches found for "${query}"` }
+          ]
+        };
+      }
+
+      const resultText = matches.map((m, i) =>
+        `${i + 1}. "${m.text}" at [${m.coordinate}] (confidence: ${m.confidence}%)`
+      ).join("\n");
+
+      return {
+        content: [
+          { type: "image", data: ss.data, mimeType: ss.mimeType },
+          { type: "text", text: `Found ${matches.length} match${matches.length === 1 ? "" : "es"} for "${query}":\n${resultText}\n\nUse coordinate values directly with left_click to click on a match.` }
+        ]
+      };
+    } catch (err) {
+      return { content: [{ type: "text", text: `Find text error: ${err.message}` }], isError: true };
     }
   }
 );
