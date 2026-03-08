@@ -1673,6 +1673,36 @@ Improved clipboard paste terminal-vs-GUI detection to check X11 `WM_CLASS` prope
 
 **Version**: 1.29.0 | **MCP tools**: 38
 
+## Cycle 37 (2026-03-08)
+
+### Container Snapshots
+
+**computer_snapshot tool**: Save, restore, list, and delete container state snapshots using docker commit. 4 modes:
+- **save**: `docker commit` current container to a named snapshot image. Stores description, container name, and timestamp as Docker labels.
+- **restore**: Stop current container, run from snapshot image. Cleans stale X11 lock files (`/tmp/.X*-lock`) via `--entrypoint` override before starting services — fixes display startup failure caused by docker commit capturing active lock files.
+- **list**: Show all snapshots with name, container tag, size, creation date, and description.
+- **delete**: Remove snapshot by name or `name="all"` to purge all. Uses `docker rmi -f` to handle images referenced by running containers.
+
+Snapshots preserve the full container filesystem (installed packages, file changes, desktop configuration) but NOT running processes — after restore, desktop services restart fresh via start.sh.
+
+### Bugs Found & Fixed
+1. **Snapshot restore X11 lock files (Bug #24)**: `docker commit` captures `/tmp/.X1-lock` and `/tmp/.X11-unix/X1` from the running container. When restored, `Xvfb :1` in start.sh fails silently because the lock already exists. **Fix**: restore uses `--entrypoint /bin/bash -c "rm -f /tmp/.X*-lock /tmp/.X11-unix/X* && exec /start.sh"` to clean stale locks before services start.
+2. **Snapshot delete fails on in-use images**: `docker rmi` refuses to delete images referenced by running containers. **Fix**: use `docker rmi -f` (force flag).
+
+### API Research
+- Browsed Anthropic Computer Use docs in VM — no changes since `computer_20251124` / `text_editor_20250728`
+- Same 3 tool versions listed: 20251124, 20250124, 20241022
+
+### Verification Results
+- **sc-142**: snapshot save/list/delete — docker commands all work, restore with X11 lock cleanup: display ready at attempt 1, filesystem correctly restored ✅
+- **sc-143**: dogfooding — browsed Anthropic docs, opened terminal, ran system info. All tools responsive ✅
+
+### Commits
+1. `1b158b5` — feat: add computer_snapshot tool for save/restore container state
+2. `08fdedc` — fix: snapshot restore X11 lock cleanup + force delete
+
+**Version**: 1.30.0 | **MCP tools**: 39
+
 ## Cycle 34 (2026-03-08)
 
 ### Inline Action Batching
