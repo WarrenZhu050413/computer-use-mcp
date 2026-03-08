@@ -26,6 +26,31 @@ const MAX_API_DIMENSION = 1568; // Anthropic spec: max longest edge in API space
 // === Session recording ===
 const activeSessions = new Map(); // sessionName -> { name, container, started, actions[] }
 
+// === Keyboard shortcuts map ===
+const SHORTCUTS = {
+  // Clipboard
+  copy: "ctrl+c", cut: "ctrl+x", paste: "ctrl+v",
+  // Editing
+  undo: "ctrl+z", redo: "ctrl+shift+z", select_all: "ctrl+a",
+  delete_line: "ctrl+shift+k",
+  // File
+  save: "ctrl+s", save_as: "ctrl+shift+s", open: "ctrl+o",
+  new_file: "ctrl+n", print: "ctrl+p",
+  // Search
+  find: "ctrl+f", find_replace: "ctrl+h", find_next: "ctrl+g",
+  // Browser/Tab
+  new_tab: "ctrl+t", close_tab: "ctrl+w", reopen_tab: "ctrl+shift+t",
+  next_tab: "ctrl+Tab", prev_tab: "ctrl+shift+Tab",
+  refresh: "ctrl+r", hard_refresh: "ctrl+shift+r",
+  address_bar: "ctrl+l", back: "alt+Left", forward: "alt+Right",
+  // Window
+  close_window: "alt+F4", fullscreen: "F11", switch_window: "alt+Tab",
+  // Terminal-specific
+  terminal_copy: "ctrl+shift+c", terminal_paste: "ctrl+shift+v",
+  // Zoom
+  zoom_in: "ctrl+plus", zoom_out: "ctrl+minus", zoom_reset: "ctrl+0",
+};
+
 // === Multi-container environment tracking ===
 const environments = new Map();
 let nextEnvPort = 1;
@@ -402,7 +427,7 @@ function executeAction({ action, coordinate, text, scroll_direction, scroll_amou
 
 const server = new McpServer({
   name: "computer-use",
-  version: "1.8.0",
+  version: "1.9.0",
 });
 
 const actionSchema = {
@@ -597,6 +622,17 @@ Multi-container: use container_name to target a specific environment (see comput
       // For non-screenshot/wait/zoom/cursor_position actions, capture follow-up screenshot
       await new Promise(r => setTimeout(r, SCREENSHOT_DELAY_MS));
       const ss = takeScreenshot(cn);
+
+      // Attach screenshot to session recording if include_screenshots is enabled
+      for (const [, session] of activeSessions) {
+        if (session.container === cn && session.includeScreenshots && session.actions.length > 0) {
+          session.actions[session.actions.length - 1].screenshot = {
+            data: ss.data,
+            mimeType: ss.mimeType,
+          };
+        }
+      }
+
       return {
         content: [
           { type: "image", data: ss.data, mimeType: ss.mimeType },
@@ -1331,9 +1367,10 @@ server.tool(
   "Start recording actions performed on a virtual desktop. All subsequent computer actions will be logged to the session. Use computer_session_stop to save the recording.",
   {
     name: z.string().optional().describe("Session name (auto-generated if omitted)"),
+    include_screenshots: z.boolean().optional().describe("Capture a screenshot after each action (default: false). Makes session files larger but provides visual state for debugging."),
     container_name: z.string().optional().describe("Container to record (default: primary)"),
   },
-  async ({ name, container_name }) => {
+  async ({ name, include_screenshots, container_name }) => {
     const cn = resolveContainer(container_name);
     const sessionName = name || `session-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}`;
 
@@ -1361,6 +1398,7 @@ server.tool(
       started: new Date().toISOString(),
       startedMs: Date.now(),
       resolution: `${env?.width || DISPLAY_WIDTH}x${env?.height || DISPLAY_HEIGHT}`,
+      includeScreenshots: !!include_screenshots,
       actions: [],
     });
 
@@ -1414,6 +1452,7 @@ server.tool(
       name: session.name,
       container: session.container,
       resolution: session.resolution,
+      include_screenshots: session.includeScreenshots,
       started: session.started,
       ended: new Date().toISOString(),
       duration_ms: Date.now() - session.startedMs,
@@ -1573,6 +1612,70 @@ server.tool(
         { type: "text", text: resultText }
       ]
     };
+  }
+);
+
+server.tool(
+  "computer_shortcut",
+  `Execute a named keyboard shortcut. Convenience wrapper around the key action.
+Use name="list" to see all available shortcuts.
+Categories: clipboard (copy/cut/paste), editing (undo/redo/select_all), file (save/open/new),
+search (find/find_replace), browser (new_tab/close_tab/refresh/address_bar/back/forward),
+window (close_window/fullscreen/switch_window), terminal (terminal_copy/terminal_paste),
+zoom (zoom_in/zoom_out/zoom_reset).`,
+  {
+    name: z.string().describe("Shortcut name (e.g. 'copy', 'paste', 'undo', 'new_tab', 'fullscreen') or 'list' to show all"),
+    container_name: z.string().optional().describe("Target container (default: primary)"),
+  },
+  async ({ name: shortcutName, container_name }) => {
+    if (shortcutName === "list") {
+      const grouped = {};
+      const categories = {
+        clipboard: ["copy", "cut", "paste"],
+        editing: ["undo", "redo", "select_all", "delete_line"],
+        file: ["save", "save_as", "open", "new_file", "print"],
+        search: ["find", "find_replace", "find_next"],
+        browser: ["new_tab", "close_tab", "reopen_tab", "next_tab", "prev_tab", "refresh", "hard_refresh", "address_bar", "back", "forward"],
+        window: ["close_window", "fullscreen", "switch_window"],
+        terminal: ["terminal_copy", "terminal_paste"],
+        zoom: ["zoom_in", "zoom_out", "zoom_reset"],
+      };
+      let listing = "";
+      for (const [cat, names] of Object.entries(categories)) {
+        listing += `\n${cat}:\n`;
+        for (const n of names) {
+          listing += `  ${n} → ${SHORTCUTS[n]}\n`;
+        }
+      }
+      return { content: [{ type: "text", text: `Available shortcuts:${listing}` }] };
+    }
+
+    const combo = SHORTCUTS[shortcutName];
+    if (!combo) {
+      const suggestions = Object.keys(SHORTCUTS).filter(k => k.includes(shortcutName)).slice(0, 5);
+      return {
+        content: [{ type: "text", text: `Unknown shortcut '${shortcutName}'${suggestions.length > 0 ? `. Did you mean: ${suggestions.join(", ")}?` : ""}\nUse name="list" to see all shortcuts.` }],
+        isError: true
+      };
+    }
+
+    try {
+      const cn = resolveContainer(container_name);
+      executeAction({ action: "key", text: combo }, cn);
+      await new Promise(r => setTimeout(r, SCREENSHOT_DELAY_MS));
+      const ss = takeScreenshot(cn);
+      return {
+        content: [
+          { type: "image", data: ss.data, mimeType: ss.mimeType },
+          { type: "text", text: `Shortcut '${shortcutName}' executed (${combo})` }
+        ]
+      };
+    } catch (err) {
+      return {
+        content: [{ type: "text", text: `Error executing shortcut '${shortcutName}': ${err.message}` }],
+        isError: true
+      };
+    }
   }
 );
 
