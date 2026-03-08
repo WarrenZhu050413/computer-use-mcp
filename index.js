@@ -1165,15 +1165,22 @@ server.tool(
         targetUrl = "https://" + targetUrl;
       }
 
-      // Use firefox CLI — it handles both launching and adding tabs
+      // Auto-detect browser binary (firefox-esr on Debian/Ubuntu, firefox on others)
+      let browserBin;
+      try {
+        browserBin = dockerExec("which firefox-esr || which firefox", 5000, cn).toString().trim().split("\n")[0];
+      } catch {
+        browserBin = "firefox-esr"; // fallback
+      }
+
       const firefoxArgs = new_window ? ["--new-window", targetUrl] : [targetUrl];
       try {
         dockerExec(
-          `DISPLAY=:${getDisplayNumber(cn)} firefox ${firefoxArgs.map(a => `'${a.replace(/'/g, "'\\''")}'`).join(" ")} &`,
+          `DISPLAY=:${getDisplayNumber(cn)} ${browserBin} ${firefoxArgs.map(a => `'${a.replace(/'/g, "'\\''")}'`).join(" ")} &`,
           5000, cn
         );
       } catch {
-        // firefox CLI sometimes exits non-zero even when it works (async launch)
+        // browser CLI sometimes exits non-zero even when it works (async launch)
       }
 
       // Wait for page load
