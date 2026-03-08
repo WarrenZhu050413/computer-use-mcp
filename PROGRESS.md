@@ -2189,6 +2189,48 @@ Smarter a11y element matching that prefers: exact name > starts-with > shorter n
 - [ ] Performance: reduce screenshot latency on high-frequency operations
 - [ ] Monitor for Anthropic API updates
 
+## Cycle 48 (2026-03-08)
+
+### New Features
+
+#### computer_a11y_wait — semantic element polling (9427b47)
+New tool that waits for accessibility elements to appear or disappear using the AT-SPI2 tree. Much more reliable than OCR-based `wait_for_text` for UI elements like buttons, links, dialogs, and spinners.
+
+Parameters:
+- `role` / `name` — element matching (same as other a11y tools)
+- `mode` — `"appear"` (default) or `"disappear"`
+- `timeout` — 1-60s (default 10)
+- `interval` — 200-5000ms poll interval (default 500)
+- `click` — auto-click when found (appear mode only)
+- `require_showing` — require AT-SPI2 "showing" state (visible on screen)
+- `app` / `window_title` — filtering
+
+### Bug Fixes
+
+#### a11y_wait timeout must not use isError (f250889)
+MCP SDK returns "Unknown error" when tool handlers return `isError: true` with image content. Timeout is an expected outcome (not an error), so changed to return a normal response — matching the `wait_for_text` pattern.
+
+### Testing
+
+1. **Appear mode**: Waited for "Learn more" link on example.com → found after 1.2s (1 poll) ✓
+2. **Disappear mode**: Waited for "Learn more" to disappear → timed out gracefully after 4.6s with clear message ✓
+3. **Click mode**: Waited for "FrameBook" link on HN → found and auto-clicked, navigated to fb.edoo.gg ✓
+
+### Commits
+1. `9427b47` — feat: add computer_a11y_wait for semantic element polling
+2. `f250889` — fix: a11y_wait timeout returns normal response, not isError
+
+### Code Stats
+- MCP server: ~6060 lines (+110)
+- 49 MCP tools (+1)
+- Server version: 1.41.0
+
+### Next Steps
+- [ ] Performance: reduce screenshot latency on high-frequency operations
+- [ ] A11y form validation reading (read error messages after submit)
+- [ ] Smart form fill: combine a11y_fill + a11y_select in one call
+- [ ] Monitor for Anthropic API updates
+
 ## Cycle 47 (2026-03-08)
 
 ### New Features
