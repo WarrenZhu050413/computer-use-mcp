@@ -64,12 +64,36 @@ Successfully completed full browser automation flow:
 - VNC: x11vnc on :5900, noVNC on :6080
 - Dockerfile updated to use Mozilla PPA for Firefox ESR
 
+---
+
+## Cycle 2 (2026-03-08)
+
+### Spec Compliance Fixes
+1. **`left_mouse_down`/`left_mouse_up` coordinate support**: Per Anthropic spec, both actions now accept optional `[x,y]` coordinate to move mouse before press/release.
+2. **`hold_key` nested action support**: Refactored from simple duration-based hold to supporting nested actions. New `hold_key_action` param accepts `{action, coordinate, text, ...}` to execute while key is held. Falls back to duration-based hold when no nested action provided.
+3. **Code architecture**: Extracted `executeAction()` function for reuse. Schema extracted to `actionSchema` const.
+
+### Docker Image Improvements
+- Added `nano` (terminal text editor)
+- Added `mousepad` (GUI text editor for XFCE)
+- Added `sudo` with passwordless access for `agent` user
+- Added `xclip` (clipboard support for xdotool/X11)
+
+### Real-World Testing Results
+- Full browser flow: Ctrl+L → type URL → navigate ✅
+- Terminal: open xfce4-terminal, type commands, execute ✅
+- File operations via /workspace volume ✅
+- Double-click word selection ✅
+- Right-click context menu ✅
+- Zoom region crop ✅
+- Scroll ✅
+- Cursor position query ✅
+
 ### Next Steps
 - [ ] Integrate findings from Anthropic reference implementation research
-- [ ] Integrate findings from MCP computer-use best practices research
 - [ ] Multi-container support (spawn/destroy environments)
 - [ ] Resolution switching
 - [ ] Session recording/replay
 - [ ] File exchange helpers via /workspace volume
 - [ ] Browser automation helpers (URL navigation, wait-for-element)
-- [ ] Rebuild Docker image with Dockerfile updates
+- [ ] Test hold_key with nested actions end-to-end after recycle
