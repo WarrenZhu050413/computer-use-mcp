@@ -148,11 +148,21 @@ function executeAction({ action, coordinate, text, scroll_direction, scroll_amou
 
     case "type": {
       if (!text) throw new Error("text required for type action");
-      const b64Text = Buffer.from(text).toString("base64");
-      const id = randomUUID().slice(0, 8);
-      const path = `/tmp/_type_${id}.txt`;
-      dockerExec(`echo ${b64Text} | base64 -d > ${path}`);
-      dockerExec(`xdotool type --clearmodifiers --delay ${TYPING_DELAY_MS} --file ${path} && rm -f ${path}`);
+      // xdotool type --file silently drops newline characters.
+      // Split on newlines and press Return between segments.
+      const lines = text.split("\n");
+      for (let i = 0; i < lines.length; i++) {
+        if (lines[i].length > 0) {
+          const b64Text = Buffer.from(lines[i]).toString("base64");
+          const id = randomUUID().slice(0, 8);
+          const path = `/tmp/_type_${id}.txt`;
+          dockerExec(`echo ${b64Text} | base64 -d > ${path}`);
+          dockerExec(`xdotool type --clearmodifiers --delay ${TYPING_DELAY_MS} --file ${path} && rm -f ${path}`);
+        }
+        if (i < lines.length - 1) {
+          xdotool("key Return");
+        }
+      }
       break;
     }
 
