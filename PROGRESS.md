@@ -2281,6 +2281,44 @@ After closing a tab, mouse cursor now moves to viewport center to prevent Firefo
 - [ ] Smart form fill: combine a11y_fill + a11y_select in one call
 - [ ] Investigate Sonnet 5 / Fennec computer use compatibility when released
 
+## Cycle 51 (2026-03-08)
+
+### Feature: exact_role parameter for all a11y tools (95def38)
+
+Audited all a11y tools for the same substring role matching bug that caused the phantom tab issue in cycle 50. Found 4 locations with `.includes()` role matching that could cause false positives:
+1. `queryA11yFlat()` — used by a11y_click, a11y_type
+2. `computer_a11y_read` — inline filter
+3. `computer_a11y_select` — inline filter
+4. `computer_a11y_fill` — inline filter
+
+**Fix**: Added `exact_role` boolean parameter (default `false`) to all 6 a11y tools + shared helpers:
+- `queryA11yFlat()` and `scrollToA11yElement()` — core helpers
+- `computer_a11y_click`, `computer_a11y_type`, `computer_a11y_read` — individual tools
+- `computer_a11y_select`, `computer_a11y_fill`, `computer_a11y_wait` — batch tools
+
+When `exact_role=true`, uses `===` instead of `.includes()` for role comparison. Default `false` preserves backward compatibility (e.g. `role="button"` still matches "push button").
+
+**Verified**:
+- `exact_role=false` + `role="page tab"` → 3 results (includes "page tab list") ✓
+- `exact_role=true` + `role="page tab"` → 2 results (only "page tab") ✓
+- `a11y_click` with `exact_role=true` → clicked correct tab ✓
+
+### Real-world test: httpbin pizza form
+Full a11y workflow end-to-end:
+- `a11y_fill`: 3 text fields (name, phone, email) — all correct
+- `a11y_select`: 1 radio button (Large), 2 checkboxes (Bacon, Mushroom) — all correct
+- `a11y_click`: Submit button — form submitted, JSON response confirmed all values
+
+### Code Stats
+- MCP server: ~6120 lines
+- 49 MCP tools
+- Server version: 1.43.0
+
+### Next Steps
+- [ ] A11y form validation reading (read error messages after submit)
+- [ ] Smart form fill: combine a11y_fill + a11y_select in one call
+- [ ] Investigate adaptive screenshot delay (shorter for simple actions)
+
 ## Cycle 50 (2026-03-08)
 
 ### Critical Bug Fix: Phantom Tab in getBrowserTabs
