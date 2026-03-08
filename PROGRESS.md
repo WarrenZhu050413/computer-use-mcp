@@ -343,8 +343,61 @@ Major feature: live display resolution changes and Anthropic-spec coordinate sca
 - Server version: 1.2.0
 
 ### Next Steps
-- [ ] `display_number` param support
+- [x] `display_number` param support → ✅ cycle 8
 - [ ] Session recording/replay
-- [ ] File exchange helpers via /workspace
+- [x] File exchange helpers via /workspace → ✅ cycle 8
 - [ ] Browser automation helpers
 - [ ] Real-world usage test at high resolution
+
+---
+
+## Cycle 8 (2026-03-08)
+
+### File Exchange Tools
+New MCP tools for reading/writing files to/from containers without going through `computer_bash`.
+
+**New Tools:**
+- `computer_file_read` — read files from container (text mode or base64 for binary)
+  - Auto-detects image files and returns as `image` content block with correct MIME type
+  - Handles directories (returns `ls -la` listing)
+  - 10MB file size limit with clear error message
+  - Text mode truncates at 16KB with size info
+- `computer_file_write` — write files to container (text or base64)
+  - Auto-creates parent directories
+  - Text mode: base64-encodes on host, decodes in container (avoids shell escaping issues)
+  - Base64 mode: writes in 64KB chunks to avoid command line length limits
+  - Returns file size after write for verification
+
+**Why not just use computer_bash?**
+- `computer_bash` truncates at 16KB and can't handle binary data
+- File tools properly handle images (returned as viewable image content)
+- Shell escaping is handled transparently (no more worrying about `$`, quotes, backticks in file content)
+
+### display_number Support
+- New `DISPLAY_NUMBER` env var (default: 1)
+- Each environment tracks its own `displayNumber`
+- All `DISPLAY=:N` references are now dynamic (no more hardcoded `:1`)
+- `dockerExec()`, `restartContainer()`, `env_create`, `env_resize` all use per-env display number
+- New helper: `getDisplayNumber(containerName)`
+
+### Verification Results
+- **file_write text mode**: ✅ 146 bytes written, special chars ($PATH, quotes, apostrophes) preserved
+- **file_read text mode**: ✅ Read back exact content with all special chars intact
+- **file_read binary/image**: ✅ 21KB PNG returned as image/png content block
+- **display_number**: ✅ Screenshot works with configurable display (default :1)
+- **Real-world browsing**: ✅ Firefox → example.com → clicked "Learn more" → navigated to iana.org
+
+### Commits
+1. `93e0a12` — feat: file exchange tools + display_number support
+
+### Code Stats
+- MCP server: 959 lines (up from 818)
+- 11 MCP tools: computer, computer_bash, computer_status, computer_file_read, computer_file_write, computer_env_create, computer_env_destroy, computer_env_list, computer_env_resize
+- Server version: 1.3.0
+
+### Next Steps
+- [ ] Session recording/replay
+- [ ] Browser automation helpers
+- [ ] Test file_write with base64 encoding (binary upload)
+- [ ] Directory listing via file_read on a directory path
+- [ ] Edge case testing: large files, unicode filenames, symlinks
