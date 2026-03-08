@@ -328,11 +328,15 @@ function clipboardPaste(content, containerName = DEFAULT_CONTAINER) {
   const pasteKey = isTerminal ? "ctrl+shift+v" : "ctrl+v";
   xdotool(`key ${pasteKey}`, containerName);
 
-  // Restore original clipboard after brief delay
+  // Restore original clipboard in background after delay
+  // Uses nohup + & so the restore doesn't block the paste action.
+  // 2s delay allows paste (including paste safety dialogs) to complete before restore.
   if (originalClipboard) {
     const b64Orig = Buffer.from(originalClipboard).toString("base64");
     const origPath = `/tmp/_cp_orig_${id}.txt`;
-    dockerExec(`sleep 0.3 && echo '${b64Orig}' | base64 -d > '${origPath}' && cat '${origPath}' | xclip -selection clipboard -i && rm -f '${origPath}'`, 30000, containerName);
+    try {
+      dockerExec(`nohup bash -c 'sleep 2 && echo '"'"'${b64Orig}'"'"' | base64 -d > '"'"'${origPath}'"'"' && cat '"'"'${origPath}'"'"' | xclip -selection clipboard -i && rm -f '"'"'${origPath}'"'"'' >/dev/null 2>&1 &`, 5000, containerName);
+    } catch { /* background restore is best-effort */ }
   }
 }
 
