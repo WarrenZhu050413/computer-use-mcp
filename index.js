@@ -427,7 +427,7 @@ function executeAction({ action, coordinate, text, scroll_direction, scroll_amou
 
 const server = new McpServer({
   name: "computer-use",
-  version: "1.12.0",
+  version: "1.13.0",
 });
 
 const actionSchema = {
@@ -1802,44 +1802,13 @@ zoom (zoom_in/zoom_out/zoom_reset).`,
 
 // === OCR Helper ===
 
-// Shared text-finding logic used by computer_find_text and computer_scroll_to
-function findTextOnScreen(query, cn, lang = "eng", region = null, returnAll = true) {
-  const id = randomUUID().slice(0, 8);
-  const pngPath = `/tmp/_fts_${id}.png`;
-
-  dockerExec(`scrot -o ${pngPath}`, 30000, cn);
-
-  let regionOffsetX = 0, regionOffsetY = 0;
-  let ocrInput = pngPath;
-
-  if (region) {
-    const [x1, y1, x2, y2] = region;
-    const [dx1, dy1] = apiToDisplay(x1, y1, cn);
-    const [dx2, dy2] = apiToDisplay(x2, y2, cn);
-    const w = dx2 - dx1;
-    const h = dy2 - dy1;
-    if (w <= 0 || h <= 0) throw new Error("Invalid region: width and height must be positive");
-    const cropPath = `/tmp/_fts_${id}_crop.png`;
-    dockerExec(`convert ${pngPath} -crop ${w}x${h}+${dx1}+${dy1} +repage ${cropPath}`, 30000, cn);
-    ocrInput = cropPath;
-    regionOffsetX = dx1;
-    regionOffsetY = dy1;
-  }
-
-  const outBase = `/tmp/_fts_${id}_out`;
-  dockerExec(`tesseract ${ocrInput} ${outBase} -l ${lang} --psm 3 tsv 2>/dev/null`, 60000, cn);
-  const tsv = dockerExec(`cat ${outBase}.tsv && rm -f /tmp/_fts_${id}*`, 10000, cn).toString();
-
-  const lines = tsv.split("\n").slice(1);
-  const queryLower = query.toLowerCase();
-  const matches = [];
-
+// Parse tesseract TSV output into word objects
+function parseTesseractTsv(tsv) {
   const words = [];
-  for (const line of lines) {
+  for (const line of tsv.split("\n").slice(1)) {
     const cols = line.split("\t");
     if (cols.length < 12) continue;
-    const level = parseInt(cols[0]);
-    if (level !== 5) continue;
+    if (parseInt(cols[0]) !== 5) continue;
     const conf = parseFloat(cols[10]);
     const text = cols[11]?.trim();
     if (!text || conf < 0) continue;
@@ -1855,23 +1824,27 @@ function findTextOnScreen(query, cn, lang = "eng", region = null, returnAll = tr
       parNum: parseInt(cols[3]),
     });
   }
+  return words;
+}
 
+// Search parsed words for query matches, return matches array
+function matchWordsToQuery(words, query, regionOffsetX, regionOffsetY, cn, returnAll) {
+  const queryLower = query.toLowerCase();
   const queryWords = queryLower.split(/\s+/).filter(w => w.length > 0);
+  const matches = [];
+  const env = environments.get(cn);
+  const dw = env?.width || DISPLAY_WIDTH;
+  const dh = env?.height || DISPLAY_HEIGHT;
+  const s = getScaleFactor(dw, dh);
 
   if (queryWords.length === 1) {
     for (const w of words) {
       if (w.text.toLowerCase().includes(queryLower)) {
         const displayCenterX = w.left + regionOffsetX + Math.round(w.width / 2);
         const displayCenterY = w.top + regionOffsetY + Math.round(w.height / 2);
-        const env = environments.get(cn);
-        const dw = env?.width || DISPLAY_WIDTH;
-        const dh = env?.height || DISPLAY_HEIGHT;
-        const s = getScaleFactor(dw, dh);
-        const apiX = Math.round(displayCenterX * s);
-        const apiY = Math.round(displayCenterY * s);
         matches.push({
           text: w.text,
-          coordinate: [apiX, apiY],
+          coordinate: [Math.round(displayCenterX * s), Math.round(displayCenterY * s)],
           confidence: Math.round(w.conf),
           bounds: { left: Math.round((w.left + regionOffsetX) * s), top: Math.round((w.top + regionOffsetY) * s), width: Math.round(w.width * s), height: Math.round(w.height * s) }
         });
@@ -1900,16 +1873,10 @@ function findTextOnScreen(query, cn, lang = "eng", region = null, returnAll = tr
         const spanBottom = Math.max(first.top + first.height, last.top + last.height) + regionOffsetY;
         const displayCenterX = Math.round((spanLeft + spanRight) / 2);
         const displayCenterY = Math.round((spanTop + spanBottom) / 2);
-        const env = environments.get(cn);
-        const dw = env?.width || DISPLAY_WIDTH;
-        const dh = env?.height || DISPLAY_HEIGHT;
-        const s = getScaleFactor(dw, dh);
-        const apiX = Math.round(displayCenterX * s);
-        const apiY = Math.round(displayCenterY * s);
         const matchedText = words.slice(i, i + queryWords.length).map(w => w.text).join(" ");
         matches.push({
           text: matchedText,
-          coordinate: [apiX, apiY],
+          coordinate: [Math.round(displayCenterX * s), Math.round(displayCenterY * s)],
           confidence: Math.round(Math.min(...words.slice(i, i + queryWords.length).map(w => w.conf))),
           bounds: { left: Math.round(spanLeft * s), top: Math.round(spanTop * s), width: Math.round((spanRight - spanLeft) * s), height: Math.round((spanBottom - spanTop) * s) }
         });
@@ -1917,6 +1884,63 @@ function findTextOnScreen(query, cn, lang = "eng", region = null, returnAll = tr
       }
     }
   }
+
+  return matches;
+}
+
+// Shared text-finding logic used by computer_find_text and computer_scroll_to
+// Color channel fallback: if text not found on primary OCR, retries on each RGB channel
+// separately. This catches text on colored backgrounds (e.g. white text on orange bars)
+// that tesseract's default binarization misses on full-screen images.
+function findTextOnScreen(query, cn, lang = "eng", region = null, returnAll = true) {
+  const id = randomUUID().slice(0, 8);
+  const pngPath = `/tmp/_fts_${id}.png`;
+
+  dockerExec(`scrot -o ${pngPath}`, 30000, cn);
+
+  let regionOffsetX = 0, regionOffsetY = 0;
+  let ocrInput = pngPath;
+
+  if (region) {
+    const [x1, y1, x2, y2] = region;
+    const [dx1, dy1] = apiToDisplay(x1, y1, cn);
+    const [dx2, dy2] = apiToDisplay(x2, y2, cn);
+    const w = dx2 - dx1;
+    const h = dy2 - dy1;
+    if (w <= 0 || h <= 0) throw new Error("Invalid region: width and height must be positive");
+    const cropPath = `/tmp/_fts_${id}_crop.png`;
+    dockerExec(`convert ${pngPath} -crop ${w}x${h}+${dx1}+${dy1} +repage ${cropPath}`, 30000, cn);
+    ocrInput = cropPath;
+    regionOffsetX = dx1;
+    regionOffsetY = dy1;
+  }
+
+  // Primary OCR pass
+  const outBase = `/tmp/_fts_${id}_out`;
+  dockerExec(`tesseract ${ocrInput} ${outBase} -l ${lang} --psm 3 tsv 2>/dev/null`, 60000, cn);
+  const tsv = dockerExec(`cat ${outBase}.tsv`, 10000, cn).toString();
+  const words = parseTesseractTsv(tsv);
+  let matches = matchWordsToQuery(words, query, regionOffsetX, regionOffsetY, cn, returnAll);
+
+  // Color channel fallback: retry on R, G, B channels if nothing found
+  if (matches.length === 0) {
+    const channels = ["R", "G", "B"];
+    for (const ch of channels) {
+      try {
+        const chPath = `/tmp/_fts_${id}_${ch}.png`;
+        dockerExec(`convert ${ocrInput} -channel ${ch} -separate ${chPath}`, 30000, cn);
+        const chOutBase = `/tmp/_fts_${id}_${ch}_out`;
+        dockerExec(`tesseract ${chPath} ${chOutBase} -l ${lang} --psm 3 tsv 2>/dev/null`, 60000, cn);
+        const chTsv = dockerExec(`cat ${chOutBase}.tsv`, 10000, cn).toString();
+        const chWords = parseTesseractTsv(chTsv);
+        matches = matchWordsToQuery(chWords, query, regionOffsetX, regionOffsetY, cn, returnAll);
+        if (matches.length > 0) break; // Found on this channel, stop
+      } catch (e) { /* skip failed channel */ }
+    }
+  }
+
+  // Cleanup temp files
+  try { dockerExec(`rm -f /tmp/_fts_${id}*`, 10000, cn); } catch (e) { /* ignore */ }
 
   return matches;
 }
