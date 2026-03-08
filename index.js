@@ -363,7 +363,7 @@ function executeAction({ action, coordinate, text, scroll_direction, scroll_amou
 
 const server = new McpServer({
   name: "computer-use",
-  version: "1.3.0",
+  version: "1.4.0",
 });
 
 const actionSchema = {
@@ -920,6 +920,93 @@ server.tool(
     } catch (err) {
       return {
         content: [{ type: "text", text: `Error writing file: ${err.stderr?.toString() || err.message}` }],
+        isError: true
+      };
+    }
+  }
+);
+
+server.tool(
+  "computer_clipboard",
+  "Read or write the clipboard of a computer-use container. Useful for extracting copied text or injecting paste content.",
+  {
+    action: z.enum(["read", "write"]).describe("'read' to get clipboard contents, 'write' to set clipboard"),
+    text: z.string().optional().describe("Text to write to clipboard (required for 'write' action)"),
+    selection: z.enum(["clipboard", "primary", "secondary"]).optional().describe("X selection to use (default: 'clipboard'). 'primary' = middle-click paste, 'clipboard' = ctrl+v paste"),
+    container_name: z.string().optional().describe("Target container (default: primary)"),
+  },
+  async ({ action, text, selection, container_name }) => {
+    try {
+      const cn = resolveContainer(container_name);
+      const sel = selection || "clipboard";
+
+      if (action === "write") {
+        if (!text) throw new Error("text required for clipboard write");
+        // Write via base64 to avoid shell escaping issues
+        const b64 = Buffer.from(text).toString("base64");
+        dockerExec(`echo '${b64}' | base64 -d | xclip -selection ${sel}`, 10000, cn);
+        return {
+          content: [{ type: "text", text: `Clipboard (${sel}) set: ${text.length} chars` }]
+        };
+      }
+
+      // Read
+      const content = dockerExec(`xclip -selection ${sel} -o 2>/dev/null || echo "(empty)"`, 10000, cn).toString();
+      return {
+        content: [{ type: "text", text: content }]
+      };
+    } catch (err) {
+      return {
+        content: [{ type: "text", text: `Clipboard error: ${err.stderr?.toString() || err.message}` }],
+        isError: true
+      };
+    }
+  }
+);
+
+server.tool(
+  "computer_window_list",
+  "List open windows in a computer-use container. Returns window IDs, titles, and geometry. Useful for finding and targeting specific windows.",
+  {
+    filter: z.string().optional().describe("Filter windows by title substring (case-insensitive)"),
+    container_name: z.string().optional().describe("Target container (default: primary)"),
+  },
+  async ({ filter, container_name }) => {
+    try {
+      const cn = resolveContainer(container_name);
+      // Get list of window IDs
+      const wmctrlAvail = await (async () => {
+        try { dockerExec("which wmctrl", 5000, cn); return true; } catch { return false; }
+      })();
+
+      let output;
+      if (wmctrlAvail) {
+        output = dockerExec("wmctrl -l -G", 10000, cn).toString();
+      } else {
+        // Fallback: xdotool search
+        const winIds = dockerExec("xdotool search --onlyvisible --name ''", 10000, cn).toString().trim().split("\n").filter(Boolean);
+        const lines = [];
+        for (const wid of winIds.slice(0, 30)) { // Cap at 30 windows
+          try {
+            const name = dockerExec(`xdotool getwindowname ${wid}`, 5000, cn).toString().trim();
+            const geom = dockerExec(`xdotool getwindowgeometry ${wid}`, 5000, cn).toString().trim();
+            const posMatch = geom.match(/Position: (\d+),(\d+)/);
+            const sizeMatch = geom.match(/Geometry: (\d+x\d+)/);
+            lines.push(`${wid}  ${posMatch ? posMatch[1] + "," + posMatch[2] : "?"}  ${sizeMatch ? sizeMatch[1] : "?"}  ${name}`);
+          } catch {}
+        }
+        output = "WID  Position  Size  Title\n" + lines.join("\n");
+      }
+
+      if (filter) {
+        const f = filter.toLowerCase();
+        output = output.split("\n").filter(l => l.toLowerCase().includes(f)).join("\n") || "(no matching windows)";
+      }
+
+      return { content: [{ type: "text", text: output || "(no windows)" }] };
+    } catch (err) {
+      return {
+        content: [{ type: "text", text: `Window list error: ${err.stderr?.toString() || err.message}` }],
         isError: true
       };
     }
