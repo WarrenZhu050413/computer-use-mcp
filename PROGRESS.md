@@ -396,8 +396,51 @@ New MCP tools for reading/writing files to/from containers without going through
 - Server version: 1.3.0
 
 ### Next Steps
+- [x] Test file_write with base64 encoding (binary upload) → ✅ cycle 9
 - [ ] Session recording/replay
 - [ ] Browser automation helpers
-- [ ] Test file_write with base64 encoding (binary upload)
-- [ ] Directory listing via file_read on a directory path
 - [ ] Edge case testing: large files, unicode filenames, symlinks
+
+---
+
+## Cycle 9 (2026-03-08)
+
+### Clipboard & Window Management Tools
+New MCP tools for clipboard access and window discovery.
+
+**New Tools:**
+- `computer_clipboard` — read/write X clipboard contents
+  - Supports all X selections: `clipboard` (ctrl+v), `primary` (middle-click), `secondary`
+  - Write uses base64 encoding to avoid shell escaping issues
+  - Read falls back to "(empty)" on empty clipboard
+- `computer_window_list` — list open windows with ID, position, size, title
+  - Uses xdotool (wmctrl fallback if available)
+  - Optional `filter` param for case-insensitive title search
+  - Caps at 30 windows to avoid overwhelming output
+
+**Why clipboard matters:**
+- Agents can now programmatically extract text after Ctrl+C in browser/editor
+- Agents can inject text via clipboard (write + Ctrl+V) — more reliable than `type` for complex content
+- Enables cross-application copy/paste workflows
+
+### Verification Results
+- **file_write base64**: ✅ Wrote "Hello Binary World!" via base64, read back correctly (19 bytes)
+- **Clipboard write/read**: ✅ Roundtrip via xclip (base64 encoding for write, -selection clipboard -o for read)
+- **Window listing**: ✅ xdotool search returns window IDs, getwindowname/getwindowgeometry work for each
+- **Window filter**: ✅ "Firefox" filter returns Firefox window IDs with titles
+- **Real-world test**: ✅ Browsed Hacker News → clicked article → triple-click selected headline → Ctrl+C → xclip read returned exact text
+
+### Commits
+1. `e6bfa74` — feat: clipboard + window list tools (v1.4.0)
+
+### Code Stats
+- MCP server: ~1047 lines (up from 959)
+- 13 MCP tools: computer, computer_bash, computer_status, computer_clipboard, computer_window_list, computer_file_read, computer_file_write, computer_env_create, computer_env_destroy, computer_env_list, computer_env_resize
+- Server version: 1.4.0
+
+### Next Steps
+- [ ] Session recording/replay
+- [ ] Browser automation helpers (navigate to URL, wait for page load)
+- [ ] Edge case testing: large files, unicode filenames, symlinks
+- [ ] Keyboard shortcut helper (common shortcuts as named actions)
+- [ ] Process management (list/kill processes in container)
