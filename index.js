@@ -3,7 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { execFileSync } from "child_process";
-import { randomUUID } from "crypto";
+import { randomUUID, createHash } from "crypto";
 import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync } from "fs";
 import { basename, extname } from "path";
 
@@ -1610,6 +1610,127 @@ server.tool(
       content: [
         { type: "image", data: ss.data, mimeType: ss.mimeType },
         { type: "text", text: resultText }
+      ]
+    };
+  }
+);
+
+server.tool(
+  "computer_wait_for",
+  `Wait for the display to reach a visual state. Two modes:
+- "stable": Wait until the screen stops changing (e.g. page finished loading, animation ended). Returns when N consecutive screenshots are identical.
+- "change": Wait until the screen changes from its current state (e.g. waiting for command output, dialog to appear).
+Optional region parameter monitors only a portion of the screen (avoids false triggers from clocks, cursors, etc.).`,
+  {
+    mode: z.enum(["stable", "change"]).default("stable").describe("'stable' = wait for screen to stop changing; 'change' = wait for screen to differ from current"),
+    region: z.array(z.number()).optional().describe("[x1, y1, x2, y2] monitor only this region (API coordinates). Omit to monitor full screen."),
+    timeout: z.number().min(1).max(60).default(10).describe("Max seconds to wait before returning (default: 10)"),
+    interval: z.number().min(0.5).max(10).default(1).describe("Seconds between screenshot checks (default: 1)"),
+    stable_count: z.number().min(2).max(10).default(2).describe("For 'stable' mode: consecutive identical frames needed (default: 2)"),
+    container_name: z.string().optional().describe("Target container (default: primary)"),
+  },
+  async ({ mode, region, timeout, interval, stable_count, container_name }) => {
+    const cn = resolveContainer(container_name);
+
+    // Helper: take screenshot and return hash + data
+    function captureAndHash() {
+      if (region && region.length === 4) {
+        // Crop to region for comparison
+        const [rx1, ry1, rx2, ry2] = region;
+        const [dx1, dy1] = apiToDisplay(rx1, ry1, cn);
+        const [dx2, dy2] = apiToDisplay(rx2, ry2, cn);
+        const cropW = dx2 - dx1;
+        const cropH = dy2 - dy1;
+        if (cropW <= 0 || cropH <= 0) throw new Error("region must have positive width and height");
+        const id = randomUUID().slice(0, 8);
+        const ssPath = `/tmp/_wf_${id}.png`;
+        const useJpeg = SCREENSHOT_FORMAT === "jpeg" || SCREENSHOT_FORMAT === "jpg";
+        const outExt = useJpeg ? "jpg" : "png";
+        const cropPath = `/tmp/_wf_${id}_crop.${outExt}`;
+        const qualityFlag = useJpeg ? `-quality ${SCREENSHOT_QUALITY}` : "";
+        dockerExec(`scrot -o ${ssPath}`, 30000, cn);
+        dockerExec(`convert ${ssPath} -crop ${cropW}x${cropH}+${dx1}+${dy1} +repage ${qualityFlag} ${cropPath}`, 30000, cn);
+        const b64 = dockerExec(`base64 ${cropPath} && rm -f ${ssPath} ${cropPath}`, 30000, cn).toString().replace(/\s/g, "");
+        const hash = createHash("md5").update(b64).digest("hex");
+        const mime = useJpeg ? "image/jpeg" : "image/png";
+        return { hash, data: b64, mimeType: mime };
+      } else {
+        // Full screenshot
+        const ss = takeScreenshot(cn);
+        const hash = createHash("md5").update(ss.data).digest("hex");
+        return { hash, data: ss.data, mimeType: ss.mimeType };
+      }
+    }
+
+    const startTime = Date.now();
+    const timeoutMs = timeout * 1000;
+    const intervalMs = interval * 1000;
+    let checks = 0;
+    let lastCapture = null;
+
+    if (mode === "change") {
+      // Take initial screenshot, then wait for it to differ
+      const initial = captureAndHash();
+      checks = 1;
+      while (Date.now() - startTime < timeoutMs) {
+        await new Promise(r => setTimeout(r, intervalMs));
+        const current = captureAndHash();
+        checks++;
+        if (current.hash !== initial.hash) {
+          const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+          return {
+            content: [
+              { type: "image", data: current.data, mimeType: current.mimeType },
+              { type: "text", text: `Screen changed after ${elapsed}s (${checks} checks)${region ? ` [region ${region.join(",")}]` : ""}` }
+            ]
+          };
+        }
+      }
+      // Timeout — return last screenshot
+      const final = captureAndHash();
+      const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+      return {
+        content: [
+          { type: "image", data: final.data, mimeType: final.mimeType },
+          { type: "text", text: `Timeout: no change detected after ${elapsed}s (${checks + 1} checks)${region ? ` [region ${region.join(",")}]` : ""}` }
+        ]
+      };
+    }
+
+    // mode === "stable": wait for consecutive identical frames
+    let consecutiveMatches = 0;
+    let prevHash = null;
+
+    while (Date.now() - startTime < timeoutMs) {
+      const current = captureAndHash();
+      checks++;
+      if (prevHash !== null && current.hash === prevHash) {
+        consecutiveMatches++;
+        if (consecutiveMatches >= stable_count - 1) {
+          // We have stable_count identical frames (current + (stable_count-1) previous matches)
+          const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+          return {
+            content: [
+              { type: "image", data: current.data, mimeType: current.mimeType },
+              { type: "text", text: `Screen stable after ${elapsed}s (${stable_count} identical frames, ${checks} checks)${region ? ` [region ${region.join(",")}]` : ""}` }
+            ]
+          };
+        }
+      } else {
+        consecutiveMatches = 0;
+      }
+      prevHash = current.hash;
+      lastCapture = current;
+      await new Promise(r => setTimeout(r, intervalMs));
+    }
+
+    // Timeout — return last screenshot
+    const final = lastCapture || captureAndHash();
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+    return {
+      content: [
+        { type: "image", data: final.data, mimeType: final.mimeType },
+        { type: "text", text: `Timeout: screen did not stabilize after ${elapsed}s (max consecutive matches: ${consecutiveMatches}, needed ${stable_count - 1}, ${checks} checks)${region ? ` [region ${region.join(",")}]` : ""}` }
       ]
     };
   }
