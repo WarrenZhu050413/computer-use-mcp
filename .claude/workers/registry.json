@@ -1,0 +1,26 @@
+{
+  "_config": {
+    "merge_authority": "merger",
+    "deploy_authority": "merger",
+    "mission_authority": "chief-of-staff",
+    "tmux_session": "",
+    "project_name": "computer-use-mcp"
+  },
+  "chief-of-staff": {
+    "model": "opus",
+    "permission_mode": "bypassPermissions",
+    "disallowed_tools": [
+      "Bash(git reset --hard*)",
+      "Bash(git clean*)",
+      "Bash(rm -rf*)",
+      "Bash(sudo *)"
+    ],
+    "status": "idle",
+    "perpetual": true,
+    "sleep_duration": 900,
+    "cycles_completed": 0,
+    "report_to": null,
+    "window": "main",
+    "custom": {}
+  }
+}
