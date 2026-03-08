@@ -527,7 +527,7 @@ function executeAction({ action, coordinate, text, scroll_direction, scroll_amou
 
 const server = new McpServer({
   name: "computer-use",
-  version: "1.31.0",
+  version: "1.33.0",
 });
 
 const actionSchema = {
@@ -4765,6 +4765,119 @@ server.tool(
       return { content: [{ type: "text", text: `Unknown mode: ${mode}` }], isError: true };
     } catch (err) {
       return { content: [{ type: "text", text: `Inspect error: ${err.message}` }], isError: true };
+    }
+  }
+);
+
+// === Accessibility Tree (AT-SPI2) ===
+
+server.tool(
+  "computer_accessibility",
+  "Extract the accessibility tree from the desktop via AT-SPI2. Returns structured JSON with role, name, states, bounding boxes, text content, and actions for all UI elements. Much richer than OCR — gives semantic understanding of the UI (buttons, menus, text fields, etc). Requires at-spi2-core + libatk-adaptor in the container (included in default image).",
+  {
+    mode: z.enum(["all", "app", "window", "diagnose"]).default("all").describe("'all': entire desktop tree. 'app': filter by application name. 'window': filter by window title. 'diagnose': check if a11y bus is running."),
+    filter: z.string().optional().describe("Application name or window title substring (required for mode='app' or 'window')"),
+    max_depth: z.number().min(1).max(100).default(10).describe("Maximum tree depth (default 10, max 100). Use lower values for overview, higher for detail."),
+    include_text: z.boolean().default(true).describe("Include text content from Text interfaces (default true)"),
+    flat: z.boolean().default(false).describe("Return flat list with paths instead of nested tree"),
+    container_name: z.string().optional().describe("Target container (default: primary)"),
+  },
+  async ({ mode, filter, max_depth, include_text, flat, container_name }) => {
+    const cn = container_name || DEFAULT_CONTAINER;
+    try {
+      // Build python command
+      let cmd = "python3 /usr/local/bin/a11y_tree.py --compact";
+      if (mode === "diagnose") {
+        cmd += " --diagnose";
+      } else {
+        cmd += ` --depth ${max_depth || 10}`;
+        if (!include_text) cmd += " --no-text";
+        if (flat) cmd += " --flat";
+        if (mode === "app") {
+          if (!filter) return { content: [{ type: "text", text: "Error: 'filter' param required for mode='app'" }], isError: true };
+          cmd += ` --app '${filter.replace(/'/g, "'\\''")}'`;
+        } else if (mode === "window") {
+          if (!filter) return { content: [{ type: "text", text: "Error: 'filter' param required for mode='window'" }], isError: true };
+          cmd += ` --window-title '${filter.replace(/'/g, "'\\''")}'`;
+        }
+      }
+
+      // Need DBUS_SESSION_BUS_ADDRESS — read from container's dbus session
+      // The a11y script needs the session bus to talk to at-spi-bus-launcher
+      const fullCmd = `DBUS_SESSION_BUS_ADDRESS=$(cat /tmp/dbus-session 2>/dev/null || echo "") GTK_MODULES=gail:atk-bridge ${cmd}`;
+      const output = dockerExec(fullCmd, 60000, cn).toString().trim();
+
+      if (mode === "diagnose") {
+        return { content: [{ type: "text", text: output }] };
+      }
+
+      // Parse and convert bounding boxes from display coords to API coords
+      let result;
+      try {
+        result = JSON.parse(output);
+      } catch {
+        return { content: [{ type: "text", text: output }] };
+      }
+
+      // Check for errors from the script
+      if (result.error) {
+        return { content: [{ type: "text", text: `AT-SPI2 error: ${result.error}${result.available ? '\nAvailable apps: ' + result.available.join(', ') : ''}` }], isError: true };
+      }
+
+      // Convert bbox coords from display to API space
+      const env = environments.get(cn);
+      const dispW = env?.width || DISPLAY_WIDTH;
+      const dispH = env?.height || DISPLAY_HEIGHT;
+      const scaleFactor = getScaleFactor(dispW, dispH);
+
+      function convertBboxes(node) {
+        if (!node || typeof node !== "object") return;
+        if (node.bbox) {
+          node.bbox = {
+            x: Math.round(node.bbox.x * scaleFactor),
+            y: Math.round(node.bbox.y * scaleFactor),
+            width: Math.round(node.bbox.width * scaleFactor),
+            height: Math.round(node.bbox.height * scaleFactor),
+          };
+        }
+        if (Array.isArray(node.children)) node.children.forEach(convertBboxes);
+        if (Array.isArray(node.nodes)) node.nodes.forEach(convertBboxes);
+      }
+
+      if (result.applications) result.applications.forEach(convertBboxes);
+      if (result.windows) result.windows.forEach(convertBboxes);
+      if (result.nodes) result.nodes.forEach(convertBboxes);
+
+      // Count nodes for summary
+      function countNodes(node) {
+        if (!node) return 0;
+        let c = 1;
+        if (Array.isArray(node.children)) node.children.forEach(ch => { c += countNodes(ch); });
+        return c;
+      }
+
+      let totalNodes = 0;
+      if (result.applications) result.applications.forEach(a => { totalNodes += countNodes(a); });
+      if (result.windows) result.windows.forEach(w => { totalNodes += countNodes(w); });
+      if (result.count) totalNodes = result.count;
+
+      const summary = `Accessibility tree: ${totalNodes} nodes, depth=${max_depth || 10}`;
+      const jsonStr = JSON.stringify(result, null, 2);
+
+      // Truncate if too large
+      const text = jsonStr.length > MAX_RESPONSE_LEN
+        ? jsonStr.slice(0, MAX_RESPONSE_LEN) + `\n... (truncated, ${jsonStr.length} total chars. Use lower max_depth or filter by app/window)`
+        : jsonStr;
+
+      const ss = takeScreenshot(cn);
+      return {
+        content: [
+          { type: "image", data: ss.data, mimeType: ss.mimeType },
+          { type: "text", text: `${summary}\n\n${text}` }
+        ]
+      };
+    } catch (err) {
+      return { content: [{ type: "text", text: `Accessibility error: ${err.message}` }], isError: true };
     }
   }
 );
