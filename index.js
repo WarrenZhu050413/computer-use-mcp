@@ -740,10 +740,10 @@ server.tool(
 
     try {
       // Kill Xvfb and x11vnc, restart with new resolution
-      // Note: dockerExec already wraps in bash -c, so no nested bash -c needed
-      dockerExec(`kill $(pgrep -f 'Xvfb :1') 2>/dev/null || true`, 10000, cn);
-      dockerExec(`kill $(pgrep -f x11vnc) 2>/dev/null || true`, 10000, cn);
-      await new Promise(r => setTimeout(r, 1000));
+      // Kill commands may return non-zero (143/SIGTERM propagation) — catch and continue
+      try { dockerExec(`pkill -f 'Xvfb :1' || true; exit 0`, 10000, cn); } catch {}
+      try { dockerExec(`pkill x11vnc || true; exit 0`, 10000, cn); } catch {}
+      await new Promise(r => setTimeout(r, 1500));
 
       // Start new Xvfb with requested resolution (nohup + & to background)
       dockerExec(`nohup Xvfb :1 -screen 0 ${width}x${height}x24 +extension GLX +render -noreset > /dev/null 2>&1 &`, 10000, cn);
