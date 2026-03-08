@@ -1,0 +1,57 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(docker *)",
+      "Bash(node *)",
+      "Bash(npm *)",
+      "Bash(git *)",
+      "Bash(cat *)",
+      "Bash(ls *)",
+      "Bash(find *)",
+      "Bash(grep *)",
+      "Bash(curl *)",
+      "Bash(mkdir *)",
+      "Bash(chmod *)",
+      "Bash(cp *)",
+      "Bash(mv *)",
+      "Bash(rm *)",
+      "Bash(tmux *)",
+      "Bash(brew *)",
+      "Bash(kill *)",
+      "Bash(sleep *)",
+      "Bash(wc *)",
+      "Bash(head *)",
+      "Bash(tail *)",
+      "Read",
+      "Write",
+      "Edit",
+      "Glob",
+      "Grep",
+      "Agent",
+      "mcp__worker-fleet__*",
+      "mcp__computer-use__*"
+    ]
+  },
+  "mcpServers": {
+    "worker-fleet": {
+      "command": "bun",
+      "args": [
+        "run",
+        "/Users/kevinster/.claude-ops/mcp/worker-fleet/index.ts"
+      ],
+      "env": {
+        "PROJECT_ROOT": "/Users/kevinster/computer-use-mcp",
+        "WORKER_NAME": "cu-chief"
+      }
+    },
+    "computer-use": {
+      "command": "node",
+      "args": [
+        "/Users/kevinster/computer-use-mcp/index.js"
+      ],
+      "env": {
+        "CONTAINER_NAME": "computer-use"
+      }
+    }
+  }
+}
