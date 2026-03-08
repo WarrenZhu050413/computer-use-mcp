@@ -5118,10 +5118,27 @@ async function scrollToA11yElement({ role, name, app, window_title, container_na
   return q;
 }
 
+// ── Shared A11y node filter ───────────────────────────────────────
+// Pure filter: no I/O, just matches nodes by role/name. Reused by
+// queryA11yFlat, a11y_read, a11y_select, and a11y_fill.
+function filterA11yNodes(nodes, { role, name, exact_role = false, require_bbox = true } = {}) {
+  const matchRole = role ? role.toLowerCase() : null;
+  const matchName = name ? name.toLowerCase() : null;
+  return nodes.filter(node => {
+    if (require_bbox && (!node.bbox || node.bbox.width <= 0 || node.bbox.height <= 0)) return false;
+    const nodeRole = (node.role || "").toLowerCase();
+    const nodeName = (node.name || "").toLowerCase();
+    if (matchRole && (exact_role ? nodeRole !== matchRole : !nodeRole.includes(matchRole))) return false;
+    if (matchName && !nodeName.includes(matchName)) return false;
+    return true;
+  });
+}
+
 // ── Shared A11y query helper ──────────────────────────────────────
-function queryA11yFlat({ role, name, app, window_title, container_name, depth = 20, exact_role = false }) {
+function queryA11yFlat({ role, name, app, window_title, container_name, depth = 20, exact_role = false, include_text = true, require_bbox = true }) {
   const cn = container_name || DEFAULT_CONTAINER;
   let cmd = `python3 /usr/local/bin/a11y_tree.py --compact --flat --depth ${depth}`;
+  if (!include_text) cmd += " --no-text";
   if (app) {
     cmd += ` --app '${app.replace(/'/g, "'\\''")}'`;
   } else if (window_title) {
@@ -5141,17 +5158,7 @@ function queryA11yFlat({ role, name, app, window_title, container_name, depth = 
   }
 
   const nodes = result.nodes || [];
-  const matchRole = role ? role.toLowerCase() : null;
-  const matchName = name ? name.toLowerCase() : null;
-
-  const matches = nodes.filter(node => {
-    if (!node.bbox || node.bbox.width <= 0 || node.bbox.height <= 0) return false;
-    const nodeRole = (node.role || "").toLowerCase();
-    const nodeName = (node.name || "").toLowerCase();
-    if (matchRole && (exact_role ? nodeRole !== matchRole : !nodeRole.includes(matchRole))) return false;
-    if (matchName && !nodeName.includes(matchName)) return false;
-    return true;
-  });
+  const matches = filterA11yNodes(nodes, { role, name, exact_role, require_bbox });
 
   // Sort by relevance: showing state + name similarity
   sortByNameRelevance(matches, name);
@@ -5284,43 +5291,15 @@ server.tool(
         return { content: [{ type: "text", text: "Error: at least one of 'role' or 'name' must be specified" }], isError: true };
       }
 
-      // Build a11y query — include text if requested
-      let cmd = `python3 /usr/local/bin/a11y_tree.py --compact --flat --depth 20`;
-      if (!include_text) cmd += " --no-text";
-      if (app) {
-        cmd += ` --app '${app.replace(/'/g, "'\\''")}'`;
-      } else if (window_title) {
-        cmd += ` --window-title '${window_title.replace(/'/g, "'\\''")}'`;
-      }
-      const fullCmd = `DBUS_SESSION_BUS_ADDRESS=$(cat /tmp/dbus-session 2>/dev/null || echo "") GTK_MODULES=gail:atk-bridge ${cmd}`;
-      const output = dockerExec(fullCmd, 60000, cn).toString().trim();
+      // Use shared query helper — require_bbox=false so we can read elements without visible bounds
+      const q = queryA11yFlat({ role, name, app, window_title, container_name: cn, exact_role, include_text, require_bbox: false });
+      if (q.error) return { content: [{ type: "text", text: q.error }], isError: true };
 
-      let result;
-      try {
-        result = JSON.parse(output);
-      } catch {
-        return { content: [{ type: "text", text: `Failed to parse a11y tree: ${output.slice(0, 500)}` }], isError: true };
-      }
-      if (result.error) {
-        return { content: [{ type: "text", text: `AT-SPI2 error: ${result.error}` }], isError: true };
-      }
-
-      const nodes = result.nodes || [];
-      const matchRole = role ? role.toLowerCase() : null;
-      const matchName = name ? name.toLowerCase() : null;
-
-      const matches = nodes.filter(node => {
-        const nodeRole = (node.role || "").toLowerCase();
-        const nodeName = (node.name || "").toLowerCase();
-        if (matchRole && (exact_role ? nodeRole !== matchRole : !nodeRole.includes(matchRole))) return false;
-        if (matchName && !nodeName.includes(matchName)) return false;
-        return true;
-      });
-
+      const matches = q.matches;
       if (matches.length === 0) {
         const searchDesc = [role && `role="${role}"`, name && `name="${name}"`].filter(Boolean).join(", ");
         return {
-          content: [{ type: "text", text: `No elements found matching ${searchDesc}. ${nodes.length} nodes searched.` }],
+          content: [{ type: "text", text: `No elements found matching ${searchDesc}. ${q.totalNodes} nodes searched.` }],
           isError: true
         };
       }
@@ -5711,19 +5690,9 @@ server.tool(
 
       for (let ei = 0; ei < elements.length; ei++) {
         const elem = elements[ei];
-        const matchRole = elem.role ? elem.role.toLowerCase() : null;
-        const matchName = elem.name ? elem.name.toLowerCase() : null;
 
-        // Find matching nodes (allNodes already sorted with "showing" first from queryA11yFlat)
-        const elemMatches = allNodes.filter(node => {
-          const nodeRole = (node.role || "").toLowerCase();
-          const nodeName = (node.name || "").toLowerCase();
-          if (matchRole && (exact_role ? nodeRole !== matchRole : !nodeRole.includes(matchRole))) return false;
-          if (matchName && !nodeName.includes(matchName)) return false;
-          return true;
-        });
-
-        // Sort by relevance: showing state + name similarity
+        // Filter matching nodes from pre-fetched tree using shared helper
+        const elemMatches = filterA11yNodes(allNodes, { role: elem.role, name: elem.name, exact_role, require_bbox: true });
         sortByNameRelevance(elemMatches, elem.name);
 
         if (elemMatches.length === 0) {
@@ -5903,19 +5872,9 @@ server.tool(
 
       for (let fi = 0; fi < fields.length; fi++) {
         const field = fields[fi];
-        const matchRole = field.role ? field.role.toLowerCase() : null;
-        const matchName = field.name ? field.name.toLowerCase() : null;
 
-        // Find matching nodes from the pre-fetched tree
-        const fieldMatches = allNodes.filter(node => {
-          const nodeRole = (node.role || "").toLowerCase();
-          const nodeName = (node.name || "").toLowerCase();
-          if (matchRole && (exact_role ? nodeRole !== matchRole : !nodeRole.includes(matchRole))) return false;
-          if (matchName && !nodeName.includes(matchName)) return false;
-          return true;
-        });
-
-        // Sort by relevance: showing state + name similarity
+        // Filter matching nodes from pre-fetched tree using shared helper
+        const fieldMatches = filterA11yNodes(allNodes, { role: field.role, name: field.name, exact_role, require_bbox: true });
         sortByNameRelevance(fieldMatches, field.name);
 
         if (fieldMatches.length === 0) {
