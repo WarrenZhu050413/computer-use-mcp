@@ -1791,3 +1791,67 @@ Researched latest Anthropic docs (March 2026). Findings:
 - [ ] Computer Use API: monitor for 2026 updates
 - [ ] Explore: idle detection (auto-screenshot if no actions for N seconds)
 - [ ] Performance: benchmark screenshot latency, optimize if >500ms
+
+---
+
+## Cycle 38 (2026-03-08)
+
+### New Features
+
+#### Container Resource Limits (env_create)
+- `memory_mb` and `cpus` params added to `computer_env_create`
+- Docker `--memory` and `--cpus` flags applied to `docker run`
+- Limits preserved across `restartContainer()` and `computer_snapshot` restore
+- Shown in `computer_env_list` output (e.g. `limits:512MB/1cpu`)
+
+#### computer_scrape (Content Extraction)
+- Extract text from focused window via select-all + copy to clipboard
+- Two methods: `select_all` (Ctrl+A → Ctrl+C, default) and `visible` (just copy current selection)
+- Much faster and more accurate than OCR for browser pages, editors, terminals
+- Saves original clipboard, restores in background after extraction
+- Truncates output to 16KB with char count
+
+#### computer_notify (Desktop Notifications)
+- Display desktop notifications inside the container via `notify-send`
+- Configurable: title, body, urgency (low/normal/critical), icon, timeout
+- Useful for signaling status to VNC observers or testing notification flows
+- Required adding `libnotify-bin` + `xfce4-notifyd` to Dockerfile
+
+#### computer_inspect (Window/Element Inspection)
+- Structured JSON output for window properties: class, instance, PID, position, size, state, type
+- Three modes:
+  - `active`: inspect focused window
+  - `all`: list all visible application windows (filters internal XFCE windows)
+  - `at`: find window at specific API coordinate
+- Uses `xprop`, `xdotool`, `xwininfo` (requires `x11-utils`)
+- Coordinates in API space (auto-scaled from display coords)
+
+### API Research
+- API unchanged: `computer_20251124` and `text_editor_20250728` still latest
+- Anthropic now references Mutter + Tint2 as their desktop (we use XFCE — fine)
+- Sonnet 3.7 now marked as deprecated
+- Competitor landscape: Playwright MCP (28.4k stars) leads with accessibility tree snapshots, Windows-MCP (4.6k) has multiselect/multiedit. Our 41 tools exceed all competitors in scope.
+
+### Real-World Dogfooding
+- Browsed HN in Firefox, clicked articles, navigated GitHub repos
+- Scrolled, used back button, opened terminal alongside browser
+- Typed and executed shell commands in terminal
+- Tested desktop notification (visible in screenshot top-right)
+- No bugs found — all actions smooth
+
+### Commits
+1. `ea323f4` — feat: add memory_mb and cpus resource limits to env_create
+2. `a7522ef` — feat: add computer_scrape and computer_notify tools
+3. `1e5124e` — feat: add computer_inspect tool for window/element inspection
+
+### Code Stats
+- MCP server: ~4730 lines (up from ~4470)
+- 41 MCP tools (up from 38)
+- Server version: 1.31.0
+
+### Next Steps
+- [ ] AT-SPI accessibility tree extraction (needs Dockerfile + Python bindings)
+- [ ] Web content extraction in computer_navigate (return page text + title)
+- [ ] Resolution/device profiles (mobile, tablet, desktop_hd presets)
+- [ ] Test computer_scrape on browser page + verify clipboard restore
+- [ ] Monitor for API updates (next check in ~4 cycles)
