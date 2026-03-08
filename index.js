@@ -527,7 +527,7 @@ function executeAction({ action, coordinate, text, scroll_direction, scroll_amou
 
 const server = new McpServer({
   name: "computer-use",
-  version: "1.34.0",
+  version: "1.35.0",
 });
 
 const actionSchema = {
@@ -4956,58 +4956,23 @@ server.tool(
         return { content: [{ type: "text", text: "Error: at least one of 'role' or 'name' must be specified" }], isError: true };
       }
 
-      // Build a11y tree query — use flat mode for easier searching
-      let cmd = "python3 /usr/local/bin/a11y_tree.py --compact --flat --depth 20";
-      if (app) {
-        cmd += ` --app '${app.replace(/'/g, "'\\''")}'`;
-      } else if (window_title) {
-        cmd += ` --window-title '${window_title.replace(/'/g, "'\\''")}'`;
-      }
+      const q = queryA11yFlat({ role, name, app, window_title, container_name: cn });
+      if (q.error) return { content: [{ type: "text", text: q.error }], isError: true };
 
-      const fullCmd = `DBUS_SESSION_BUS_ADDRESS=$(cat /tmp/dbus-session 2>/dev/null || echo "") GTK_MODULES=gail:atk-bridge ${cmd}`;
-      const output = dockerExec(fullCmd, 60000, cn).toString().trim();
-
-      let result;
-      try {
-        result = JSON.parse(output);
-      } catch {
-        return { content: [{ type: "text", text: `Failed to parse a11y tree: ${output.slice(0, 500)}` }], isError: true };
-      }
-
-      if (result.error) {
-        return { content: [{ type: "text", text: `AT-SPI2 error: ${result.error}${result.available ? '\nAvailable apps: ' + result.available.join(', ') : ''}` }], isError: true };
-      }
-
-      // Search flat nodes for matching elements
-      const nodes = result.nodes || [];
-      const matchRole = role ? role.toLowerCase() : null;
-      const matchName = name ? name.toLowerCase() : null;
-
-      const matches = nodes.filter(node => {
-        if (!node.bbox || node.bbox.width <= 0 || node.bbox.height <= 0) return false;
-        const nodeRole = (node.role || "").toLowerCase();
-        const nodeName = (node.name || "").toLowerCase();
-        if (matchRole && !nodeRole.includes(matchRole)) return false;
-        if (matchName && !nodeName.includes(matchName)) return false;
-        return true;
-      });
-
-      if (matches.length === 0) {
-        // Take screenshot to show what's visible
+      if (q.matches.length === 0) {
         const ss = takeScreenshot(cn);
         const searchDesc = [role && `role="${role}"`, name && `name="${name}"`].filter(Boolean).join(", ");
         return {
           content: [
             { type: "image", data: ss.data, mimeType: ss.mimeType },
-            { type: "text", text: `No element found matching ${searchDesc}. ${nodes.length} nodes searched.${app ? ` App filter: "${app}"` : ""}${window_title ? ` Window filter: "${window_title}"` : ""}` }
+            { type: "text", text: `No element found matching ${searchDesc}. ${q.totalNodes} nodes searched.${app ? ` App filter: "${app}"` : ""}${window_title ? ` Window filter: "${window_title}"` : ""}` }
           ],
           isError: true
         };
       }
 
-      // Select the target element
-      const targetIdx = Math.min(index || 0, matches.length - 1);
-      const target = matches[targetIdx];
+      const targetIdx = Math.min(index || 0, q.matches.length - 1);
+      const target = q.matches[targetIdx];
 
       // Convert bbox from display coords to API coords, then click at center
       const env = environments.get(cn);
@@ -5033,7 +4998,7 @@ server.tool(
       await new Promise(r => setTimeout(r, SCREENSHOT_DELAY_MS));
       const ss = takeScreenshot(cn);
 
-      const matchInfo = matches.length > 1 ? ` (match ${targetIdx + 1}/${matches.length})` : "";
+      const matchInfo = q.matches.length > 1 ? ` (match ${targetIdx + 1}/${q.matches.length})` : "";
       return {
         content: [
           { type: "image", data: ss.data, mimeType: ss.mimeType },
@@ -5042,6 +5007,247 @@ server.tool(
       };
     } catch (err) {
       return { content: [{ type: "text", text: `A11y click error: ${err.message}` }], isError: true };
+    }
+  }
+);
+
+// ── Shared A11y query helper ──────────────────────────────────────
+function queryA11yFlat({ role, name, app, window_title, container_name, depth = 20 }) {
+  const cn = container_name || DEFAULT_CONTAINER;
+  let cmd = `python3 /usr/local/bin/a11y_tree.py --compact --flat --depth ${depth}`;
+  if (app) {
+    cmd += ` --app '${app.replace(/'/g, "'\\''")}'`;
+  } else if (window_title) {
+    cmd += ` --window-title '${window_title.replace(/'/g, "'\\''")}'`;
+  }
+  const fullCmd = `DBUS_SESSION_BUS_ADDRESS=$(cat /tmp/dbus-session 2>/dev/null || echo "") GTK_MODULES=gail:atk-bridge ${cmd}`;
+  const output = dockerExec(fullCmd, 60000, cn).toString().trim();
+
+  let result;
+  try {
+    result = JSON.parse(output);
+  } catch {
+    return { error: `Failed to parse a11y tree: ${output.slice(0, 500)}` };
+  }
+  if (result.error) {
+    return { error: `AT-SPI2 error: ${result.error}${result.available ? '\nAvailable apps: ' + result.available.join(', ') : ''}` };
+  }
+
+  const nodes = result.nodes || [];
+  const matchRole = role ? role.toLowerCase() : null;
+  const matchName = name ? name.toLowerCase() : null;
+
+  const matches = nodes.filter(node => {
+    if (!node.bbox || node.bbox.width <= 0 || node.bbox.height <= 0) return false;
+    const nodeRole = (node.role || "").toLowerCase();
+    const nodeName = (node.name || "").toLowerCase();
+    if (matchRole && !nodeRole.includes(matchRole)) return false;
+    if (matchName && !nodeName.includes(matchName)) return false;
+    return true;
+  });
+
+  return { matches, totalNodes: nodes.length, cn };
+}
+
+// ── computer_a11y_type ───────────────────────────────────────────
+server.tool(
+  "computer_a11y_type",
+  "Type text into a UI element found by accessibility role/name. Finds the element via AT-SPI2, clicks to focus it, optionally clears existing content, then types the text. Ideal for filling form fields, search boxes, and text inputs without needing coordinates.",
+  {
+    role: z.string().optional().describe("Accessibility role to match (e.g. 'text', 'entry', 'combo box', 'document'). Defaults to common text input roles if omitted."),
+    name: z.string().optional().describe("Element name/label to match (substring, case-insensitive). E.g. 'Search', 'Email', 'Password', 'URL'"),
+    text: z.string().describe("Text to type into the element"),
+    clear_first: z.boolean().default(true).describe("Select all + delete before typing (default: true). Set false to append."),
+    app: z.string().optional().describe("Filter by application name (e.g. 'Firefox', 'xfce4-terminal')"),
+    window_title: z.string().optional().describe("Filter by window title substring"),
+    index: z.number().optional().describe("If multiple elements match, target the Nth one (0-based, default 0)"),
+    container_name: z.string().optional().describe("Target container (default: primary)"),
+  },
+  async ({ role, name, text, clear_first, app, window_title, index, container_name }) => {
+    const cn = container_name || DEFAULT_CONTAINER;
+    try {
+      // Default to common text input roles if no role specified
+      const effectiveRole = role || null;
+      if (!effectiveRole && !name) {
+        return { content: [{ type: "text", text: "Error: at least one of 'role' or 'name' must be specified" }], isError: true };
+      }
+
+      const q = queryA11yFlat({ role: effectiveRole, name, app, window_title, container_name: cn });
+      if (q.error) return { content: [{ type: "text", text: q.error }], isError: true };
+
+      if (q.matches.length === 0) {
+        const ss = takeScreenshot(cn);
+        const searchDesc = [role && `role="${role}"`, name && `name="${name}"`].filter(Boolean).join(", ");
+        return {
+          content: [
+            { type: "image", data: ss.data, mimeType: ss.mimeType },
+            { type: "text", text: `No element found matching ${searchDesc}. ${q.totalNodes} nodes searched.` }
+          ],
+          isError: true
+        };
+      }
+
+      const targetIdx = Math.min(index || 0, q.matches.length - 1);
+      const target = q.matches[targetIdx];
+
+      // Click to focus the element
+      const displayX = target.bbox.x + Math.round(target.bbox.width / 2);
+      const displayY = target.bbox.y + Math.round(target.bbox.height / 2);
+      xdotool(`mousemove ${displayX} ${displayY} click 1`, cn);
+      await new Promise(r => setTimeout(r, 300));
+
+      // Clear existing content if requested
+      if (clear_first !== false) {
+        xdotool("key ctrl+a", cn);
+        await new Promise(r => setTimeout(r, 100));
+        xdotool("key Delete", cn);
+        await new Promise(r => setTimeout(r, 100));
+      }
+
+      // Type the text using the same logic as the main type action
+      const hasUnicode = /[^\x00-\x7F]/.test(text);
+      const isLargeAscii = text.length > 500;
+
+      if (hasUnicode || isLargeAscii) {
+        await clipboardPaste(text, cn);
+      } else {
+        // Short ASCII: xdotool type --file, split on newlines
+        const lines = text.split('\n');
+        for (let i = 0; i < lines.length; i++) {
+          if (lines[i].length > 0) {
+            const b64 = Buffer.from(lines[i]).toString('base64');
+            dockerExec(`bash -c "echo '${b64}' | base64 -d > /tmp/xdotype.txt && xdotool type --delay 2 --file /tmp/xdotype.txt"`, 10000, cn);
+          }
+          if (i < lines.length - 1) {
+            xdotool("key Return", cn);
+          }
+        }
+      }
+
+      // Screenshot
+      await new Promise(r => setTimeout(r, SCREENSHOT_DELAY_MS));
+      const ss = takeScreenshot(cn);
+
+      const env = environments.get(cn);
+      const dispW = env?.width || DISPLAY_WIDTH;
+      const dispH = env?.height || DISPLAY_HEIGHT;
+      const scaleFactor = getScaleFactor(dispW, dispH);
+      const apiX = Math.round(displayX * scaleFactor);
+      const apiY = Math.round(displayY * scaleFactor);
+
+      const matchInfo = q.matches.length > 1 ? ` (match ${targetIdx + 1}/${q.matches.length})` : "";
+      const clearInfo = clear_first !== false ? " (cleared first)" : " (appended)";
+      return {
+        content: [
+          { type: "image", data: ss.data, mimeType: ss.mimeType },
+          { type: "text", text: `Typed ${text.length} chars into ${target.role} "${target.name}" at [${apiX}, ${apiY}]${matchInfo}${clearInfo}` }
+        ]
+      };
+    } catch (err) {
+      return { content: [{ type: "text", text: `A11y type error: ${err.message}` }], isError: true };
+    }
+  }
+);
+
+// ── computer_a11y_read ───────────────────────────────────────────
+server.tool(
+  "computer_a11y_read",
+  "Read properties of UI elements found by accessibility role/name. Returns structured data about matching elements: role, name, states (focused, enabled, checked, etc.), text content, value, available actions, and bounding box. Useful for verifying UI state without screenshots or OCR.",
+  {
+    role: z.string().optional().describe("Accessibility role to match (e.g. 'push button', 'check box', 'text', 'link')"),
+    name: z.string().optional().describe("Element name/label to match (substring, case-insensitive)"),
+    app: z.string().optional().describe("Filter by application name"),
+    window_title: z.string().optional().describe("Filter by window title substring"),
+    max_results: z.number().default(10).describe("Maximum number of matching elements to return (default: 10)"),
+    include_text: z.boolean().default(true).describe("Include text content from Text interface (default: true)"),
+    container_name: z.string().optional().describe("Target container (default: primary)"),
+  },
+  async ({ role, name, app, window_title, max_results, include_text, container_name }) => {
+    const cn = container_name || DEFAULT_CONTAINER;
+    try {
+      if (!role && !name) {
+        return { content: [{ type: "text", text: "Error: at least one of 'role' or 'name' must be specified" }], isError: true };
+      }
+
+      // Build a11y query — include text if requested
+      let cmd = `python3 /usr/local/bin/a11y_tree.py --compact --flat --depth 20`;
+      if (include_text) cmd += " --include-text";
+      if (app) {
+        cmd += ` --app '${app.replace(/'/g, "'\\''")}'`;
+      } else if (window_title) {
+        cmd += ` --window-title '${window_title.replace(/'/g, "'\\''")}'`;
+      }
+      const fullCmd = `DBUS_SESSION_BUS_ADDRESS=$(cat /tmp/dbus-session 2>/dev/null || echo "") GTK_MODULES=gail:atk-bridge ${cmd}`;
+      const output = dockerExec(fullCmd, 60000, cn).toString().trim();
+
+      let result;
+      try {
+        result = JSON.parse(output);
+      } catch {
+        return { content: [{ type: "text", text: `Failed to parse a11y tree: ${output.slice(0, 500)}` }], isError: true };
+      }
+      if (result.error) {
+        return { content: [{ type: "text", text: `AT-SPI2 error: ${result.error}` }], isError: true };
+      }
+
+      const nodes = result.nodes || [];
+      const matchRole = role ? role.toLowerCase() : null;
+      const matchName = name ? name.toLowerCase() : null;
+
+      const matches = nodes.filter(node => {
+        const nodeRole = (node.role || "").toLowerCase();
+        const nodeName = (node.name || "").toLowerCase();
+        if (matchRole && !nodeRole.includes(matchRole)) return false;
+        if (matchName && !nodeName.includes(matchName)) return false;
+        return true;
+      });
+
+      if (matches.length === 0) {
+        const searchDesc = [role && `role="${role}"`, name && `name="${name}"`].filter(Boolean).join(", ");
+        return {
+          content: [{ type: "text", text: `No elements found matching ${searchDesc}. ${nodes.length} nodes searched.` }],
+          isError: true
+        };
+      }
+
+      // Convert bbox to API coords and format results
+      const env = environments.get(cn);
+      const dispW = env?.width || DISPLAY_WIDTH;
+      const dispH = env?.height || DISPLAY_HEIGHT;
+      const scaleFactor = getScaleFactor(dispW, dispH);
+
+      const limited = matches.slice(0, max_results || 10);
+      const elements = limited.map((node, i) => {
+        const el = {
+          index: i,
+          role: node.role,
+          name: node.name || "",
+          path: node.path || "",
+        };
+        if (node.states && node.states.length > 0) el.states = node.states;
+        if (node.text) el.text = node.text.slice(0, 1000);
+        if (node.value !== undefined) el.value = node.value;
+        if (node.actions && node.actions.length > 0) el.actions = node.actions;
+        if (node.description) el.description = node.description;
+        if (node.bbox) {
+          el.bbox = {
+            x: Math.round(node.bbox.x * scaleFactor),
+            y: Math.round(node.bbox.y * scaleFactor),
+            width: Math.round(node.bbox.width * scaleFactor),
+            height: Math.round(node.bbox.height * scaleFactor),
+          };
+        }
+        return el;
+      });
+
+      const searchDesc = [role && `role="${role}"`, name && `name="${name}"`].filter(Boolean).join(", ");
+      const summary = `Found ${matches.length} element(s) matching ${searchDesc}${matches.length > limited.length ? ` (showing first ${limited.length})` : ""}`;
+
+      return {
+        content: [{ type: "text", text: `${summary}\n\n${JSON.stringify(elements, null, 2)}` }]
+      };
+    } catch (err) {
+      return { content: [{ type: "text", text: `A11y read error: ${err.message}` }], isError: true };
     }
   }
 );
