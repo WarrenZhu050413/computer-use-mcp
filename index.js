@@ -552,7 +552,7 @@ function executeAction({ action, coordinate, text, scroll_direction, scroll_amou
 
 const server = new McpServer({
   name: "computer-use",
-  version: "1.43.0",
+  version: "1.44.0",
 });
 
 const actionSchema = {

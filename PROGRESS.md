@@ -2281,6 +2281,42 @@ After closing a tab, mouse cursor now moves to viewport center to prevent Firefo
 - [ ] Smart form fill: combine a11y_fill + a11y_select in one call
 - [ ] Investigate Sonnet 5 / Fennec computer use compatibility when released
 
+## Cycle 52 (2026-03-08)
+
+### Performance: Adaptive screenshot delays (8f0d8ed, fa40ac6)
+
+Replaced fixed 1000ms `SCREENSHOT_DELAY_MS` delay with proportional per-action delays:
+
+| Tier | Delay | Actions | Speedup |
+|------|-------|---------|---------|
+| `DELAY_FAST` | 200ms | mouse_move, left_mouse_down, left_mouse_up, window_move, cursor repositioning | **5x** |
+| `DELAY_MEDIUM` | 500ms | clicks, keys, scrolls, window ops, a11y tools, tabs, shortcuts | **2x** |
+| `DELAY_FULL` | 1000ms | type, left_click_drag, hold_key | 1x |
+
+- `getActionDelay(action)` helper selects delay in main `computer` tool handler
+- 24 delay sites updated across all tools (main handler, window_*, a11y_*, tabs, shortcut, macro, batch, scroll_to, type_file)
+- Macro/session replay inter-action delays use `DELAY_MEDIUM` base
+- All delays proportional to `SCREENSHOT_DELAY_MS` env var with `Math.min` cap to preserve `FAST ≤ MEDIUM ≤ FULL` invariant for any delay value (50ms–5000ms tested)
+
+**Verified live**:
+- screenshot: instant ✓
+- mouse_move: 200ms (noticeably snappier) ✓
+- left_click: 500ms (HN link loaded within delay) ✓
+- type: 1000ms (text fully rendered) ✓
+- key (Escape): 500ms ✓
+- scroll: 500ms ✓
+- Real-world: browsed HN, clicked article, scrolled comments — all smooth ✓
+
+### Code Stats
+- MCP server: ~6140 lines
+- 49 MCP tools
+- Server version: 1.44.0
+
+### Next Steps
+- [ ] A11y form validation reading (read error messages after submit)
+- [ ] Smart form fill: combine a11y_fill + a11y_select in one call
+- [ ] DRY refactor: a11y_read/select/fill inline filters → reuse queryA11yFlat
+
 ## Cycle 51 (2026-03-08)
 
 ### Feature: exact_role parameter for all a11y tools (95def38)
