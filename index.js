@@ -527,7 +527,7 @@ function executeAction({ action, coordinate, text, scroll_direction, scroll_amou
 
 const server = new McpServer({
   name: "computer-use",
-  version: "1.35.0",
+  version: "1.37.0",
 });
 
 const actionSchema = {
@@ -5261,10 +5261,11 @@ server.tool(
     action: z.enum(["list", "switch", "close", "new"]).describe("list=show all tabs, switch=activate a tab, close=close a tab, new=open new tab"),
     target: z.union([z.string(), z.number()]).optional().describe("Tab index (0-based) or title substring. Required for switch/close actions."),
     url: z.string().optional().describe("URL to navigate to after opening new tab (for 'new' action)"),
-    include_url: z.boolean().default(false).describe("For 'list': also read the URL of the active tab from the address bar (adds ~500ms)"),
+    include_url: z.boolean().default(false).describe("For 'list': read URLs. 'active' (default if true) reads active tab only (~500ms). 'all' reads every tab (~500ms per tab, switches back to original)."),
+    include_url_mode: z.enum(["active", "all"]).optional().describe("'active' = only active tab URL (fast), 'all' = all tab URLs (switches tabs). Only used when include_url=true."),
     container_name: z.string().optional().describe("Target container (default: primary)"),
   },
-  async ({ action, target, url, include_url, container_name }) => {
+  async ({ action, target, url, include_url, include_url_mode, container_name }) => {
     const cn = container_name || DEFAULT_CONTAINER;
     try {
       // Helper: get browser tabs from a11y tree
@@ -5334,23 +5335,48 @@ server.tool(
         const result = getBrowserTabs();
         if (result.error) return { content: [{ type: "text", text: result.error }], isError: true };
 
-        // Optionally get URL of active tab
-        let activeUrl = null;
+        const urlMode = include_url_mode || "active";
+        const tabUrls = new Map(); // index → url
+
         if (include_url) {
-          activeUrl = getActiveTabUrl();
+          if (urlMode === "all" && result.tabs.length > 1) {
+            // Read URLs for ALL tabs: remember active, iterate each, switch back
+            const activeTab = result.tabs.find(t => t.active);
+            const activeIdx = activeTab ? activeTab.index : 0;
+
+            for (const tab of result.tabs) {
+              if (!tab.active) {
+                clickTab(tab);
+                await new Promise(r => setTimeout(r, 500));
+              }
+              const tabUrl = getActiveTabUrl();
+              if (tabUrl) tabUrls.set(tab.index, tabUrl);
+            }
+
+            // Switch back to originally active tab
+            if (activeTab && !result.tabs[result.tabs.length - 1].active) {
+              // We ended on the last tab we iterated; switch back if different
+              const finalTab = result.tabs[result.tabs.length - 1];
+              if (finalTab.index !== activeIdx) {
+                clickTab(activeTab);
+                await new Promise(r => setTimeout(r, 500));
+              }
+            }
+          } else {
+            // Active tab URL only (fast path)
+            const activeUrl = getActiveTabUrl();
+            const activeTab = result.tabs.find(t => t.active);
+            if (activeUrl && activeTab) tabUrls.set(activeTab.index, activeUrl);
+          }
         }
 
         await new Promise(r => setTimeout(r, 300));
         const ss = takeScreenshot(cn);
 
-        const env = environments.get(cn);
-        const dispW = env?.width || DISPLAY_WIDTH;
-        const dispH = env?.height || DISPLAY_HEIGHT;
-        const scaleFactor = getScaleFactor(dispW, dispH);
-
         const tabLines = result.tabs.map(t => {
           let line = `${t.active ? "→" : " "} [${t.index}] ${t.title}`;
-          if (t.active && activeUrl) line += `\n     URL: ${activeUrl}`;
+          const tabUrl = tabUrls.get(t.index);
+          if (tabUrl) line += `\n     URL: ${tabUrl}`;
           return line;
         }).join("\n");
 
@@ -5458,6 +5484,145 @@ server.tool(
       return { content: [{ type: "text", text: `Error: unknown action "${action}"` }], isError: true };
     } catch (err) {
       return { content: [{ type: "text", text: `Tabs error: ${err.message}` }], isError: true };
+    }
+  }
+);
+
+// ── computer_a11y_fill ──────────────────────────────────────────
+server.tool(
+  "computer_a11y_fill",
+  "Fill multiple form fields in one call using accessibility. Each field is identified by role/name and typed into sequentially. Ideal for login forms, registration pages, search + filter combos. Single a11y tree query, multiple field fills, one final screenshot.",
+  {
+    fields: z.array(z.object({
+      role: z.string().optional().describe("Accessibility role (e.g. 'entry', 'text', 'combo box')"),
+      name: z.string().optional().describe("Element label/name substring (case-insensitive). E.g. 'Email', 'Password', 'Username'"),
+      text: z.string().describe("Text to type into this field"),
+      clear_first: z.boolean().optional().default(true).describe("Clear field before typing (default: true)"),
+      index: z.number().optional().describe("If multiple elements match, target the Nth one (0-based, default 0)"),
+    })).min(1).max(20).describe("Array of fields to fill. Each needs at least 'name' or 'role' + 'text'."),
+    app: z.string().optional().describe("Filter by application name (e.g. 'Firefox')"),
+    window_title: z.string().optional().describe("Filter by window title substring"),
+    submit: z.boolean().default(false).describe("Press Enter/Return after filling the last field (e.g. to submit a form)"),
+    tab_between: z.boolean().default(false).describe("Press Tab between fields instead of clicking each one. Faster but assumes tab order matches field order."),
+    container_name: z.string().optional().describe("Target container (default: primary)"),
+  },
+  async ({ fields, app, window_title, submit, tab_between, container_name }) => {
+    const cn = container_name || DEFAULT_CONTAINER;
+    try {
+      // Validate that each field has at least name or role
+      for (let i = 0; i < fields.length; i++) {
+        if (!fields[i].name && !fields[i].role) {
+          return { content: [{ type: "text", text: `Error: field[${i}] must have at least 'name' or 'role'` }], isError: true };
+        }
+      }
+
+      // Query a11y tree once (no role/name filter — we filter per-field below)
+      const q = queryA11yFlat({ role: null, name: null, app, window_title, container_name: cn });
+      if (q.error) return { content: [{ type: "text", text: q.error }], isError: true };
+
+      const allNodes = q.matches; // all nodes with valid bboxes
+      const results = [];
+
+      for (let fi = 0; fi < fields.length; fi++) {
+        const field = fields[fi];
+        const matchRole = field.role ? field.role.toLowerCase() : null;
+        const matchName = field.name ? field.name.toLowerCase() : null;
+
+        // Find matching nodes from the pre-fetched tree
+        const fieldMatches = allNodes.filter(node => {
+          const nodeRole = (node.role || "").toLowerCase();
+          const nodeName = (node.name || "").toLowerCase();
+          if (matchRole && !nodeRole.includes(matchRole)) return false;
+          if (matchName && !nodeName.includes(matchName)) return false;
+          return true;
+        });
+
+        if (fieldMatches.length === 0) {
+          const desc = [field.role && `role="${field.role}"`, field.name && `name="${field.name}"`].filter(Boolean).join(", ");
+          results.push({ field: fi, status: "not_found", desc });
+          continue;
+        }
+
+        const targetIdx = Math.min(field.index || 0, fieldMatches.length - 1);
+        const target = fieldMatches[targetIdx];
+
+        // Click to focus (unless tab_between and not the first field)
+        if (!tab_between || fi === 0) {
+          const displayX = target.bbox.x + Math.round(target.bbox.width / 2);
+          const displayY = target.bbox.y + Math.round(target.bbox.height / 2);
+          xdotool(`mousemove ${displayX} ${displayY} click 1`, cn);
+          await new Promise(r => setTimeout(r, 300));
+        } else {
+          // Tab to next field
+          xdotool("key Tab", cn);
+          await new Promise(r => setTimeout(r, 200));
+        }
+
+        // Clear existing content if requested
+        if (field.clear_first !== false) {
+          xdotool("key ctrl+a", cn);
+          await new Promise(r => setTimeout(r, 100));
+          xdotool("key Delete", cn);
+          await new Promise(r => setTimeout(r, 100));
+        }
+
+        // Type text
+        const hasUnicode = /[^\x00-\x7F]/.test(field.text);
+        const isLargeAscii = field.text.length > 500;
+
+        if (hasUnicode || isLargeAscii) {
+          await clipboardPaste(field.text, cn);
+        } else {
+          const lines = field.text.split('\n');
+          for (let i = 0; i < lines.length; i++) {
+            if (lines[i].length > 0) {
+              const b64 = Buffer.from(lines[i]).toString('base64');
+              dockerExec(`bash -c "echo '${b64}' | base64 -d > /tmp/xdotype.txt && xdotool type --delay 2 --file /tmp/xdotype.txt"`, 10000, cn);
+            }
+            if (i < lines.length - 1) {
+              xdotool("key Return", cn);
+            }
+          }
+        }
+
+        results.push({
+          field: fi,
+          status: "filled",
+          target: `${target.role} "${target.name}"`,
+          chars: field.text.length,
+        });
+
+        // Small delay between fields
+        if (fi < fields.length - 1) {
+          await new Promise(r => setTimeout(r, 200));
+        }
+      }
+
+      // Submit if requested
+      if (submit) {
+        xdotool("key Return", cn);
+        await new Promise(r => setTimeout(r, 500));
+      }
+
+      // Final screenshot
+      await new Promise(r => setTimeout(r, SCREENSHOT_DELAY_MS));
+      const ss = takeScreenshot(cn);
+
+      const filled = results.filter(r => r.status === "filled").length;
+      const notFound = results.filter(r => r.status === "not_found").length;
+      const summary = results.map(r => {
+        if (r.status === "filled") return `  ✓ [${r.field}] ${r.target} — ${r.chars} chars`;
+        return `  ✗ [${r.field}] ${r.desc} — not found`;
+      }).join("\n");
+
+      return {
+        content: [
+          { type: "image", data: ss.data, mimeType: ss.mimeType },
+          { type: "text", text: `Filled ${filled}/${fields.length} field(s)${notFound > 0 ? ` (${notFound} not found)` : ""}${submit ? " + submitted" : ""}:\n${summary}` }
+        ]
+      };
+    } catch (err) {
+      return { content: [{ type: "text", text: `A11y fill error: ${err.message}` }], isError: true };
     }
   }
 );
