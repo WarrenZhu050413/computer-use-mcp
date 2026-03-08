@@ -5358,9 +5358,12 @@ server.tool(
         const q = queryA11yFlat({ role: "page tab", app: "Firefox", container_name: cn });
         if (q.error) return { error: q.error };
 
-        // Filter to actual browser tabs (under "Browser tabs" toolbar, not in-page tabs)
+        // Filter to actual browser tabs:
+        // - Must be under "Browser tabs" toolbar (not in-page tabs)
+        // - Must have exact role "page tab" (not "page tab list" which is the container)
         const browserTabs = q.matches.filter(node =>
-          node.path && node.path.includes("Browser tabs")
+          node.path && node.path.includes("Browser tabs") &&
+          node.role === "page tab"
         );
 
         return {
@@ -5565,25 +5568,18 @@ server.tool(
         const expectedClose = result.tabs.length - 1;
         const keepTitle = keepTab.title;
 
-        // Keyboard-only approach: activate keep tab, then Ctrl+Tab + Ctrl+W
-        // to cycle through and close non-keep tabs. Avoids all bbox coordinate
-        // issues that cause stale-click bugs when tabs resize/shift.
-        clickTab(keepTab);
-        await new Promise(r => setTimeout(r, 500));
-
+        // Re-query tabs before each close for fresh bbox coordinates.
+        // Now reliable after fixing phantom "page tab list" entry.
         let closed = 0;
-        for (let attempt = 0; attempt < expectedClose + 5; attempt++) {
+        for (let attempt = 0; attempt < expectedClose + 3; attempt++) {
           const fresh = getBrowserTabs();
           if (fresh.error || fresh.tabs.length <= 1) break;
-
-          // If on keep tab, switch to next tab first
-          const activeTab = fresh.tabs.find(t => t.active);
-          if (activeTab && activeTab.title === keepTitle) {
-            xdotool("key ctrl+Tab", cn);
-            await new Promise(r => setTimeout(r, 300));
-          }
-
-          // Close current (non-keep) tab
+          // Find a tab that isn't the keep tab (match by title)
+          const victim = fresh.tabs.find(t => t.title !== keepTitle);
+          if (!victim) break;
+          // Click victim tab to activate, then close
+          clickTab(victim);
+          await new Promise(r => setTimeout(r, 500));
           xdotool("key ctrl+w", cn);
           await new Promise(r => setTimeout(r, 500));
           closed++;
