@@ -703,7 +703,63 @@ Major feature: record, save, and replay user sessions on virtual desktops.
 - Server version: 1.8.0
 
 ### Next Steps
-- [ ] Keyboard shortcut helper (common shortcuts as named actions)
+- [x] Keyboard shortcut helper (common shortcuts as named actions) → cycle 15
 - [ ] `computer_type_file` — type large content via file (bypass xdotool limits)
 - [ ] Edge case testing: large files, special filenames, symlinks
-- [ ] Session recording with screenshots (optional screenshot capture per action)
+- [x] Session recording with screenshots (optional screenshot capture per action) → cycle 15
+
+---
+
+## Cycle 15 (2026-03-08)
+
+### New Features
+
+#### computer_shortcut — Named Keyboard Shortcuts
+Convenience tool mapping 30 human-readable shortcut names to key combos across 8 categories:
+- **clipboard**: copy, cut, paste
+- **editing**: undo, redo, select_all, delete_line
+- **file**: save, save_as, open, new_file, print
+- **search**: find, find_replace, find_next
+- **browser**: new_tab, close_tab, reopen_tab, next_tab, prev_tab, refresh, hard_refresh, address_bar, back, forward
+- **window**: close_window, fullscreen, switch_window
+- **terminal**: terminal_copy, terminal_paste
+- **zoom**: zoom_in, zoom_out, zoom_reset
+
+Features:
+- `name="list"` returns all shortcuts grouped by category
+- Fuzzy substring suggestion on typos (e.g. "cop" → "copy, terminal_copy")
+- Returns follow-up screenshot after execution
+
+#### Session Screenshots
+Added `include_screenshots` option to `computer_session_start`. When enabled:
+- Each recorded action includes a base64 screenshot captured after the action completes
+- Screenshots stored in the action entry as `{ data, mimeType }`
+- Session JSON metadata includes `include_screenshots: true`
+- ~80KB per screenshot (JPEG), so a 10-action session ≈ 800KB
+
+### Dogfooding: Python HTTP Server
+Tested full workflow inside the VM:
+1. Wrote a Python system-info HTTP server via `computer_bash`
+2. Started it from the GUI terminal via `type` + `key Return`
+3. Navigated to `http://localhost:8080` via `computer_navigate`
+4. Clicked "Refresh" button to trigger JS fetch API call
+5. System info JSON displayed correctly — no bugs found
+
+### Verification Results
+- **sc-49**: ✅ Tools load after hot restart (computer_shortcut + include_screenshots param present)
+- **sc-50**: ✅ list=30 shortcuts, new_tab opened tab, close_tab closed it, typo "cop" suggested "copy, terminal_copy"
+- **sc-51**: ✅ Session with include_screenshots=true: 2 actions, both have screenshot data (~80KB each), 164KB total JSON
+
+### Commits
+1. `2321f6f` — feat: keyboard shortcut helper + session screenshots
+
+### Code Stats
+- MCP server: ~1683 lines (up from ~1580)
+- 21 MCP tools (added: computer_shortcut)
+- Server version: 1.9.0
+
+### Next Steps
+- [ ] `computer_type_file` — type large content via file (bypass xdotool limits)
+- [ ] Edge case testing: large files, special filenames, symlinks
+- [ ] `computer_wait_for` — poll screenshots waiting for visual state change
+- [ ] Session replay with screenshot comparison (diff against recorded screenshots)
