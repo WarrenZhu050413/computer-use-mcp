@@ -864,8 +864,55 @@ Two new tools that enable agents to read and locate text on screen using tessera
 - Server version: 1.11.0
 
 ### Next Steps
-- [ ] `computer_scroll_to` — scroll until visual target appears (find_text + scroll loop)
+- [x] `computer_scroll_to` — scroll until visual target appears (find_text + scroll loop) → **done in cycle 18**
 - [ ] `computer_type_file` — type large content via file (bypass xdotool limits)
 - [ ] Edge case testing: large files, special filenames, symlinks
 - [ ] Session replay with screenshot comparison (diff against recorded screenshots)
 - [ ] OCR on colored backgrounds (login on orange HN bar wasn't detected — investigate)
+
+## Cycle 18 (2026-03-08)
+
+### Scroll-to-Text — computer_scroll_to + findTextOnScreen helper
+High-value navigation tool that combines OCR text search with automatic scrolling.
+
+**New Tool:**
+- `computer_scroll_to` — scroll until a text target appears on screen
+  - If text is already visible, returns immediately with coordinates (0 scrolls)
+  - Otherwise scrolls in given direction, OCR-checking after each scroll
+  - Stuck detection: stops early when page hits top/bottom (MD5 hash comparison)
+  - Optional `click=true` to auto-click the first match when found
+  - Params: `query`, `direction` (up/down), `scroll_amount`, `max_scrolls`, `click`, `language`
+
+**Refactor:**
+- Extracted `findTextOnScreen()` helper function from `computer_find_text`
+- Shared by both `computer_find_text` and `computer_scroll_to` — eliminates ~80 lines of duplication
+- Same matching logic: single-word substring match, multi-word consecutive match, confidence scores, bounding boxes
+
+**Why this matters:**
+- Before: Finding off-screen text required manual screenshot → scroll → screenshot → check loops
+- After: `scroll_to("Submit button")` automatically scrolls until found, returns coordinates
+- With `click=true`: one call to find and click any text on a scrollable page
+- Stuck detection prevents wasting time scrolling past page boundaries
+
+### Verification Results
+- **sc-63**: ✅ Tool loaded with correct schema after hot restart
+- **sc-64**: ✅ "Cloud VM benchmarks" found at [212,12], already visible (0 scrolls), 87% confidence
+- **sc-65**: ✅ "More" found at [136,656] after 2 scrolls down on HN page
+- **sc-66**: ✅ "xyznonexistent123" not found — stopped after 4 scrolls detecting hit bottom
+- **sc-67**: ✅ "Guidelines" found after 2 scrolls, auto-clicked, navigated to HN Guidelines page
+- **sc-68**: ✅ find_text "Hacker News Guidelines" found 3 matches — refactored helper works correctly
+
+### Commits
+1. `71c1597` — feat: computer_scroll_to + findTextOnScreen helper (v1.12.0)
+
+### Code Stats
+- MCP server: ~2137 lines (up from ~2030)
+- 25 MCP tools (added: computer_scroll_to)
+- Server version: 1.12.0
+
+### Next Steps
+- [ ] OCR preprocessing for colored backgrounds (grayscale/threshold before tesseract)
+- [ ] `computer_type_file` — type large content via file (bypass xdotool limits)
+- [ ] Edge case testing: large files, special filenames, symlinks
+- [ ] Session replay with screenshot comparison (diff against recorded screenshots)
+- [ ] scroll_to direction="up" testing (scroll up to find text above current viewport)
