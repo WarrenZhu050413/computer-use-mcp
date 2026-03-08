@@ -16,6 +16,10 @@ const DEFAULT_WORKSPACE = process.env.CONTAINER_WORKSPACE || `${process.env.HOME
 const DISPLAY_WIDTH = parseInt(process.env.DISPLAY_WIDTH || "1024", 10);
 const DISPLAY_HEIGHT = parseInt(process.env.DISPLAY_HEIGHT || "768", 10);
 const SCREENSHOT_DELAY_MS = parseInt(process.env.SCREENSHOT_DELAY_MS || "1000", 10);
+// Adaptive screenshot delays — proportional to SCREENSHOT_DELAY_MS
+const DELAY_FAST = Math.max(100, Math.round(SCREENSHOT_DELAY_MS * 0.2));   // 200ms — cursor moves, mouse down/up
+const DELAY_MEDIUM = Math.max(200, Math.round(SCREENSHOT_DELAY_MS * 0.5)); // 500ms — clicks, keys, scrolls, window ops
+const DELAY_FULL = SCREENSHOT_DELAY_MS;                                      // 1000ms — type, drag, heavy rendering
 const SCREENSHOT_FORMAT = (process.env.SCREENSHOT_FORMAT || "jpeg").toLowerCase();
 const SCREENSHOT_QUALITY = parseInt(process.env.SCREENSHOT_QUALITY || "80", 10);
 const DEFAULT_DISPLAY_NUMBER = parseInt(process.env.DISPLAY_NUMBER || "1", 10);
@@ -277,6 +281,29 @@ function validateCoord(coord, name = "coordinate", containerName = DEFAULT_CONTA
   // Scale from API coordinates to actual display coordinates
   const [dx, dy] = apiToDisplay(x, y, containerName);
   return [Math.round(dx), Math.round(dy)];
+}
+
+/** Adaptive delay per action type — fast for cursor, medium for clicks/keys, full for type/drag */
+function getActionDelay(action) {
+  switch (action) {
+    case "mouse_move":
+    case "left_mouse_down":
+    case "left_mouse_up":
+      return DELAY_FAST;
+    case "left_click":
+    case "right_click":
+    case "middle_click":
+    case "double_click":
+    case "triple_click":
+    case "key":
+    case "scroll":
+      return DELAY_MEDIUM;
+    case "type":
+    case "left_click_drag":
+    case "hold_key":
+    default:
+      return DELAY_FULL;
+  }
 }
 
 function mapKey(key) {
@@ -769,7 +796,7 @@ Multi-container: use container_name to target a specific environment (see comput
       }
 
       // For non-screenshot/wait/zoom/cursor_position actions, capture follow-up screenshot
-      await new Promise(r => setTimeout(r, SCREENSHOT_DELAY_MS));
+      await new Promise(r => setTimeout(r, getActionDelay(action)));
       const ss = takeScreenshot(cn);
 
       // Attach screenshot to session recording if include_screenshots is enabled
@@ -1449,7 +1476,7 @@ Use with computer_window_list to discover window IDs and titles first.`,
       // Activate and focus the window
       dockerExec(`xdotool windowactivate ${targetWid}`, 10000, cn);
       dockerExec(`xdotool windowfocus ${targetWid}`, 10000, cn);
-      await new Promise(r => setTimeout(r, SCREENSHOT_DELAY_MS));
+      await new Promise(r => setTimeout(r, DELAY_MEDIUM));
 
       const ss = takeScreenshot(cn);
       let winName = "";
@@ -1487,7 +1514,7 @@ Use with computer_window_list to discover window IDs and titles.`,
       // Convert API coordinates to display coordinates
       const [dx, dy] = apiToDisplay(x, y, cn);
       dockerExec(`xdotool windowmove ${targetWid} ${dx} ${dy}`, 10000, cn);
-      await new Promise(r => setTimeout(r, SCREENSHOT_DELAY_MS));
+      await new Promise(r => setTimeout(r, DELAY_FAST));
 
       const ss = takeScreenshot(cn);
       let winName = "";
@@ -1525,7 +1552,7 @@ Use with computer_window_list to discover window IDs and titles.`,
       // Convert API dimensions to display dimensions
       const [dw, dh] = apiToDisplay(width, height, cn);
       dockerExec(`xdotool windowsize ${targetWid} ${dw} ${dh}`, 10000, cn);
-      await new Promise(r => setTimeout(r, SCREENSHOT_DELAY_MS));
+      await new Promise(r => setTimeout(r, DELAY_MEDIUM));
 
       const ss = takeScreenshot(cn);
       let winName = "";
@@ -1596,7 +1623,7 @@ Use with computer_window_list to discover window IDs and titles.`,
           break;
       }
 
-      await new Promise(r => setTimeout(r, SCREENSHOT_DELAY_MS));
+      await new Promise(r => setTimeout(r, DELAY_MEDIUM));
       const ss = takeScreenshot(cn);
       let winName = "";
       try { winName = dockerExec(`xdotool getwindowname ${targetWid}`, 5000, cn).toString().trim(); } catch {}
@@ -1721,7 +1748,7 @@ Provide titles array to select specific windows, or omit to tile all visible app
         }
       }
 
-      await new Promise(r => setTimeout(r, SCREENSHOT_DELAY_MS));
+      await new Promise(r => setTimeout(r, DELAY_MEDIUM));
       const ss = takeScreenshot(cn);
       return {
         content: [
@@ -2267,7 +2294,7 @@ server.tool(
         completed++;
 
         // Brief delay after each action (let the UI catch up)
-        await new Promise(r => setTimeout(r, Math.max(200, SCREENSHOT_DELAY_MS / 2) / playbackSpeed));
+        await new Promise(r => setTimeout(r, DELAY_MEDIUM / playbackSpeed));
 
       } catch (err) {
         errors.push(`Action ${completed + 1} (${actionEntry.action}): ${err.message}`);
@@ -2648,7 +2675,7 @@ zoom (zoom_in/zoom_out/zoom_reset).`,
     try {
       const cn = resolveContainer(container_name);
       executeAction({ action: "key", text: combo }, cn);
-      await new Promise(r => setTimeout(r, SCREENSHOT_DELAY_MS));
+      await new Promise(r => setTimeout(r, DELAY_MEDIUM));
       const ss = takeScreenshot(cn);
       return {
         content: [
@@ -2973,7 +3000,7 @@ Optionally auto-clicks the text when found.`,
           if (autoClick) {
             const [dx, dy] = apiToDisplay(m.coordinate[0], m.coordinate[1], cn);
             xdotool(`mousemove ${dx} ${dy} click 1`, cn);
-            await new Promise(r => setTimeout(r, SCREENSHOT_DELAY_MS));
+            await new Promise(r => setTimeout(r, DELAY_MEDIUM));
           }
           const ss = takeScreenshot(cn);
           return {
@@ -3033,7 +3060,7 @@ Optionally auto-clicks the found text.`,
         if (autoClick) {
           const [dx, dy] = apiToDisplay(m.coordinate[0], m.coordinate[1], cn);
           xdotool(`mousemove ${dx} ${dy} click 1`, cn);
-          await new Promise(r => setTimeout(r, SCREENSHOT_DELAY_MS));
+          await new Promise(r => setTimeout(r, DELAY_MEDIUM));
         }
         const ss = takeScreenshot(cn);
         return {
@@ -3056,7 +3083,7 @@ Optionally auto-clicks the found text.`,
         const dh = env?.height || DISPLAY_HEIGHT;
         xdotool(`mousemove ${Math.round(dw / 2)} ${Math.round(dh / 2)}`, cn);
         xdotool(`click --repeat ${amount} --delay 50 ${btn}`, cn);
-        await new Promise(r => setTimeout(r, SCREENSHOT_DELAY_MS));
+        await new Promise(r => setTimeout(r, DELAY_MEDIUM));
 
         // Detect stuck (page didn't scroll — hit top/bottom)
         const id = randomUUID().slice(0, 8);
@@ -3082,7 +3109,7 @@ Optionally auto-clicks the found text.`,
           if (autoClick) {
             const [dx, dy] = apiToDisplay(m.coordinate[0], m.coordinate[1], cn);
             xdotool(`mousemove ${dx} ${dy} click 1`, cn);
-            await new Promise(r => setTimeout(r, SCREENSHOT_DELAY_MS));
+            await new Promise(r => setTimeout(r, DELAY_MEDIUM));
           }
           const ss = takeScreenshot(cn);
           return {
@@ -3388,7 +3415,7 @@ Reads the file, sets the clipboard, pastes with the correct shortcut (auto-detec
       // Paste via clipboard helper
       clipboardPaste(content, cn);
 
-      await new Promise(r => setTimeout(r, SCREENSHOT_DELAY_MS));
+      await new Promise(r => setTimeout(r, DELAY_MEDIUM));
       const ss = takeScreenshot(cn);
       const lineInfo = line_range ? ` (lines ${line_range})` : "";
       const lineCount = content.split("\n").length;
@@ -3709,7 +3736,7 @@ Actions format: [{"action":"key","text":"ctrl+t"},{"action":"type","text":"examp
               totalExecuted++;
 
               // Wait between actions (scaled by speed)
-              const actionDelay = Math.round(SCREENSHOT_DELAY_MS / playbackSpeed);
+              const actionDelay = Math.round(DELAY_MEDIUM / playbackSpeed);
               if (i < macroActions.length - 1) {
                 await new Promise(r => setTimeout(r, actionDelay));
               }
@@ -3725,7 +3752,7 @@ Actions format: [{"action":"key","text":"ctrl+t"},{"action":"type","text":"examp
         }
 
         // Take final screenshot
-        await new Promise(r => setTimeout(r, SCREENSHOT_DELAY_MS));
+        await new Promise(r => setTimeout(r, DELAY_MEDIUM));
         const ss = takeScreenshot(cn);
 
         let summary = `Macro '${name}' completed: ${totalExecuted}/${macroActions.length * repeatCount} actions executed`;
@@ -4528,7 +4555,7 @@ Max 50 actions per batch. Stops on first error unless continue_on_error is true.
       }
 
       // Take final screenshot
-      await new Promise(r => setTimeout(r, SCREENSHOT_DELAY_MS));
+      await new Promise(r => setTimeout(r, DELAY_MEDIUM));
       const ss = takeScreenshot(cn);
 
       let summary = `Batch complete: ${executed}/${parsedActions.length} actions executed`;
@@ -4992,7 +5019,7 @@ server.tool(
       xdotool(clickMap[click_type || "left_click"], cn);
 
       // Wait for reaction then screenshot
-      await new Promise(r => setTimeout(r, SCREENSHOT_DELAY_MS));
+      await new Promise(r => setTimeout(r, DELAY_MEDIUM));
       const ss = takeScreenshot(cn);
 
       const matchInfo = q.matches.length > 1 ? ` (match ${targetIdx + 1}/${q.matches.length})` : "";
@@ -5212,7 +5239,7 @@ server.tool(
       }
 
       // Screenshot
-      await new Promise(r => setTimeout(r, SCREENSHOT_DELAY_MS));
+      await new Promise(r => setTimeout(r, DELAY_MEDIUM));
       const ss = takeScreenshot(cn);
 
       const env = environments.get(cn);
@@ -5497,7 +5524,7 @@ server.tool(
         }
 
         clickTab(found.tab);
-        await new Promise(r => setTimeout(r, SCREENSHOT_DELAY_MS));
+        await new Promise(r => setTimeout(r, DELAY_MEDIUM));
         const ss = takeScreenshot(cn);
 
         return {
@@ -5536,7 +5563,7 @@ server.tool(
         const tabApi = getApiDimensions(cn);
         const [dmx, dmy] = apiToDisplay(Math.round(tabApi.width / 2), Math.round(tabApi.height / 2), cn);
         xdotool(`mousemove ${dmx} ${dmy}`, cn);
-        await new Promise(r => setTimeout(r, SCREENSHOT_DELAY_MS));
+        await new Promise(r => setTimeout(r, DELAY_FAST));
         const ss = takeScreenshot(cn);
 
         return {
@@ -5600,7 +5627,7 @@ server.tool(
         const tabApi = getApiDimensions(cn);
         const [dmx, dmy] = apiToDisplay(Math.round(tabApi.width / 2), Math.round(tabApi.height / 2), cn);
         xdotool(`mousemove ${dmx} ${dmy}`, cn);
-        await new Promise(r => setTimeout(r, SCREENSHOT_DELAY_MS));
+        await new Promise(r => setTimeout(r, DELAY_FAST));
         const ss = takeScreenshot(cn);
 
         const remaining = finalTabs.error ? "?" : finalTabs.tabs.length;
@@ -5812,7 +5839,7 @@ server.tool(
       }
 
       // Final screenshot
-      await new Promise(r => setTimeout(r, SCREENSHOT_DELAY_MS));
+      await new Promise(r => setTimeout(r, DELAY_MEDIUM));
       const ss = takeScreenshot(cn);
 
       const acted = results.filter(r => !r.status.includes("not_found")).length;
@@ -5971,7 +5998,7 @@ server.tool(
       }
 
       // Final screenshot
-      await new Promise(r => setTimeout(r, SCREENSHOT_DELAY_MS));
+      await new Promise(r => setTimeout(r, DELAY_MEDIUM));
       const ss = takeScreenshot(cn);
 
       const filled = results.filter(r => r.status === "filled").length;
@@ -6054,7 +6081,7 @@ Returns a screenshot when the condition is met (or on timeout).`,
             const cx = Math.round(target.bbox.x + target.bbox.width / 2);
             const cy = Math.round(target.bbox.y + target.bbox.height / 2);
             xdotool(`mousemove ${cx} ${cy} click 1`, cn);
-            await new Promise(r => setTimeout(r, SCREENSHOT_DELAY_MS));
+            await new Promise(r => setTimeout(r, DELAY_MEDIUM));
           } else {
             await new Promise(r => setTimeout(r, 300));
           }
