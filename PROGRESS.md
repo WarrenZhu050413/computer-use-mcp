@@ -1179,9 +1179,59 @@ Significant OCR accuracy improvement for text on colored/dark backgrounds.
 - 30 MCP tools (up from 29)
 - Server version: 1.17.0
 
+## Cycle 24 (2026-03-08)
+
+### Bug Fix: Descriptive Error Messages
+
+#### Problem: "Unknown error" from MCP SDK
+- The MCP SDK (`@modelcontextprotocol/sdk`) catches thrown `Error` objects inside async tool handlers and returns a generic "Unknown error" to the client
+- Our `computer` tool threw errors for validation failures (bad coordinates, invalid scroll_amount) which were properly caught in our try/catch, but the MCP SDK intercepted them first
+- Result: users got unhelpful "Unknown error" instead of descriptive messages
+
+#### Fix: Early Input Validation
+- Added pre-validation at the top of the `computer` tool handler that **returns** error objects instead of throwing
+- Covers: coordinate bounds/negative, start_coordinate validation, scroll_amount max (100), duration max (60s), left_click_drag missing params
+- All other tools already return `{isError: true}` objects, so this was specific to the main `computer` tool
+
+#### Error Messages Now Returned
+| Input | Before | After |
+|-------|--------|-------|
+| `coordinate: [1024, 768]` | "Unknown error" | "Error: coordinate [1024,768] out of bounds (display is 1024x768, max [1023,767])" |
+| `coordinate: [-1, -1]` | "Unknown error" | "Error: coordinate [-1,-1] values must be non-negative" |
+| `left_click_drag` missing start | "Unknown error" | "Error: start_coordinate required for left_click_drag" |
+| `scroll_amount: 999` | "Unknown error" | "Error: scroll_amount too large (max 100), got 999" |
+
+### Edge Case Testing Results
+- **Unicode in GUI (Mousepad)**: emoji, CJK, Japanese, Korean, accented chars — all perfect ✅
+- **Unicode in Terminal**: `echo "你好世界 🚀 café"` typed and executed correctly ✅
+- **Special characters via type**: backticks, dollar signs, backslashes, double backslashes — all typed correctly ✅
+- **Boundary coordinates**: [0,0] and [1023,767] both work correctly ✅
+- **type_file with spaces in filename**: `/workspace/file with spaces.txt` — works ✅
+- **type_file with symlinks**: symlink_test.py → edge_test.py — followed correctly ✅
+- **type_file nonexistent file**: "File not found: /workspace/nonexistent.txt" ✅
+- **type_file with special chars content**: backticks, $vars, quotes, emoji, CJK — all preserved ✅
+
+### Real-World Dogfooding
+- Browsed Hacker News in Firefox, scrolled through 30 items
+- Read content, tested click/scroll/navigate in real workflow
+- Verified unicode echo output in terminal
+
+### Verification Results
+- **sc-92**: ✅ Descriptive error messages for all invalid inputs
+- **sc-93**: ✅ Normal operations (screenshot, click, type, scroll, navigate) unaffected
+- **sc-94**: ✅ Real-world HN browsing workflow
+
+### Commits
+1. `56ce9b1` — fix: early input validation with descriptive error messages for computer tool (v1.18.0)
+
+### Code Stats
+- MCP server: ~2710 lines (up from ~2656)
+- 30 MCP tools (unchanged)
+- Server version: 1.18.0
+
 ### Next Steps
-- [ ] Edge case testing: large files, special filenames, symlinks
 - [ ] Session replay with screenshot comparison
 - [ ] `computer_window_tile` gap testing + cascade layout verification
 - [ ] Terminal detection improvements (more shell/emulator patterns)
 - [ ] Clipboard paste verification (ensure content actually arrived)
+- [ ] Apply early-validation pattern to other tools that throw errors
