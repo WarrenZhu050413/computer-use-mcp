@@ -1891,6 +1891,55 @@ Researched latest Anthropic docs (March 2026). Findings:
 - Server version: 1.32.0
 
 ### Next Steps
-- [ ] AT-SPI accessibility tree extraction (needs Dockerfile + Python bindings)
+- [x] AT-SPI accessibility tree extraction → done in cycle 40
 - [ ] Web content extraction in computer_navigate (return page text + title)
-- [ ] Monitor for API updates (next check in ~3 cycles)
+- [ ] Monitor for API updates (next check in ~2 cycles)
+
+---
+
+## Cycle 40 (2026-03-08)
+
+### New Feature: computer_accessibility (AT-SPI2)
+
+Major new tool — extracts the full accessibility tree from the desktop via AT-SPI2 (Assistive Technology Service Provider Interface). Provides **semantic UI understanding** that OCR alone cannot: buttons, menus, text fields, links, headings, with bounding boxes and available actions.
+
+#### Docker Changes
+- **Dockerfile**: Added `at-spi2-core`, `libatk-adaptor`, `gir1.2-atspi-2.0` packages
+- **start.sh**: AT-SPI2 bus launcher + accessibility env vars (`GTK_MODULES`, `GNOME_ACCESSIBILITY`, `QT_ACCESSIBILITY`) started BEFORE XFCE so all apps register on the a11y bus. DBUS_SESSION_BUS_ADDRESS persisted to `/tmp/dbus-session` for docker exec access.
+- **a11y_tree.py**: Python script at `/usr/local/bin/a11y_tree.py` using `gi.repository.Atspi`
+
+#### MCP Tool: computer_accessibility
+- **4 modes**: `all` (entire desktop), `app` (by name), `window` (by title), `diagnose` (bus health)
+- **Configurable**: `max_depth` (1-100, default 10), `include_text`, `flat` (list vs tree)
+- **Bounding boxes** converted from display to API coordinate space
+- **Output truncation** at 16KB with helpful message about using lower depth/filters
+- **Screenshot** included with every response
+
+#### Test Results
+- Diagnose: 12 apps on accessibility bus (xfce4-session, xfwm4, xfce4-panel, Thunar, Firefox, etc.)
+- Firefox/Example Domain at depth 15: **813 nodes** including full DOM semantics:
+  - `heading`: "Example Domain" with bbox
+  - `paragraph` elements
+  - `link`: "Learn more" with exact clickable coordinates
+  - Full browser chrome: tabs, menus, navigation bar, URL bar
+- GTK apps (XFCE terminal, Thunar, Mousepad) also expose rich a11y trees
+
+#### Why This Matters
+- Comparable to Playwright MCP's a11y tree snapshots, but for the **entire desktop** (not just the browser)
+- Enables agents to understand UI semantics without OCR guessing
+- Actionable: bounding boxes map to API coordinates for clicking
+- Roles/states tell you what you can do (is it clickable? editable? focused?)
+
+### Commits
+1. `033759a` — feat: add computer_accessibility tool — AT-SPI2 accessibility tree extraction
+
+### Code Stats
+- MCP server: ~4886 lines (up from ~4773)
+- 42 MCP tools (up from 41)
+- Server version: 1.33.0
+
+### Next Steps
+- [ ] Web content extraction in computer_navigate (return page text + title)
+- [ ] Monitor for API updates (next check in ~2 cycles)
+- [ ] Accessibility-driven click helper (click element by role+name from a11y tree)
+- [ ] Real task: use a11y tree for productive work in VM
