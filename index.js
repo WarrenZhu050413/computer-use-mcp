@@ -2,13 +2,13 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { execSync, execFileSync } from "child_process";
+import { execFileSync } from "child_process";
 import { randomUUID } from "crypto";
 
 const CONTAINER = process.env.CONTAINER_NAME || "computer-use";
-const DISPLAY_WIDTH = 1024;
-const DISPLAY_HEIGHT = 768;
-const SCREENSHOT_DELAY_MS = 1000;
+const DISPLAY_WIDTH = parseInt(process.env.DISPLAY_WIDTH || "1024", 10);
+const DISPLAY_HEIGHT = parseInt(process.env.DISPLAY_HEIGHT || "768", 10);
+const SCREENSHOT_DELAY_MS = parseInt(process.env.SCREENSHOT_DELAY_MS || "1000", 10);
 const TYPING_GROUP_SIZE = 50;
 const TYPING_DELAY_MS = 12;
 const MAX_RESPONSE_LEN = 16000;
@@ -421,10 +421,12 @@ server.tool(
   {},
   async () => {
     try {
-      const status = execSync(`docker inspect --format='{{.State.Status}}' ${CONTAINER}`,
-        { timeout: 5000 }).toString().trim();
-      const uptime = execSync(`docker inspect --format='{{.State.StartedAt}}' ${CONTAINER}`,
-        { timeout: 5000 }).toString().trim();
+      const status = execFileSync("docker", [
+        "inspect", "--format={{.State.Status}}", CONTAINER
+      ], { timeout: 5000 }).toString().trim();
+      const uptime = execFileSync("docker", [
+        "inspect", "--format={{.State.StartedAt}}", CONTAINER
+      ], { timeout: 5000 }).toString().trim();
       let display = "unknown";
       try {
         dockerExec("xdotool getdisplaygeometry");
