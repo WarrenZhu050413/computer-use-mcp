@@ -1229,6 +1229,47 @@ Significant OCR accuracy improvement for text on colored/dark backgrounds.
 - 30 MCP tools (unchanged)
 - Server version: 1.18.0
 
+## Cycle 25 (2026-03-08)
+
+### Bug Fix: Comprehensive try/catch for All Tool Handlers
+
+#### Problem: 5 tools missing try/catch wrappers
+Audited all 30 MCP tool handlers. Found 5 tools where `throw new Error` calls could bubble up to the MCP SDK (which swallows them as "Unknown error"):
+
+1. **`computer_env_list`** — entire handler had no try/catch
+2. **`computer_wait_for`** — no try/catch, `captureAndHash()` throws on invalid region
+3. **`computer_session_start`** — `resolveContainer()` throws outside try/catch on invalid container
+4. **`computer_session_stop`** — `writeFileSync()` throws outside try/catch on disk errors
+5. **`computer_session_replay`** — `resolveContainer()` at line 1948 outside try/catch
+
+#### Fix
+Wrapped all 5 tool handlers in try/catch blocks that return `{isError: true, content: [...]}` with descriptive messages. Continues the pattern from cycle 24.
+
+#### Audit Results (28 other tools)
+All 28 other tools already had proper try/catch wrapping with `{isError: true}` returns. The `throw new Error` calls inside helper functions (`resolveContainer`, `findWindowByTitleOrId`, `validateCoordinate`, `executeAction`) are all called within try/catch blocks of their parent tool handlers.
+
+### Spec Compliance Re-verification
+Browsed Anthropic Computer Use docs (platform.claude.com) inside the VM:
+- **Basic actions (all versions)**: screenshot, left_click, type, key, mouse_move — ✅ all implemented
+- **Enhanced (computer_20250124)**: scroll, left_click_drag, right/middle_click, double/triple_click, left_mouse_down/up, hold_key, wait — ✅ all implemented
+- **Enhanced (computer_20251124)**: zoom — ✅ implemented
+- **Full 16/16 Anthropic spec actions** compliant
+
+### Real-World Dogfooding
+- Navigated to Anthropic docs, used `scroll_to` to find "Available actions" (96% OCR confidence)
+- Zoomed into doc section to verify spec version details
+- Tiled terminal + Firefox side-by-side with `window_tile` (left_right, 4px gap)
+- Created and executed sysinfo.sh script via `computer_bash` + terminal workflow
+- Tested type, key, scroll, navigate, find_text, zoom, window_manage, window_tile — all working
+
+### Commits
+1. `c27a709` — fix: wrap 4 tool handlers in try/catch to prevent MCP SDK "Unknown error"
+
+### Code Stats
+- MCP server: ~2731 lines (up from ~2710)
+- 30 MCP tools (unchanged)
+- Server version: 1.18.1
+
 ### Next Steps
 - [ ] Session replay with screenshot comparison
 - [ ] `computer_window_tile` gap testing + cascade layout verification
