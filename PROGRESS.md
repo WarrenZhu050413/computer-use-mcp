@@ -1624,8 +1624,70 @@ Improved clipboard paste terminal-vs-GUI detection to check X11 `WM_CLASS` prope
 - Server version: 1.24.0
 
 ### Next Steps
-- [ ] Clipboard paste verification (ensure content actually arrived after paste)
-- [ ] Macro: add "edit" mode to modify existing macros
+- [x] Clipboard paste verification (ensure content actually arrived after paste) → ✅ cycle 32
+- [x] Macro: add "edit" mode to modify existing macros → ✅ cycle 32
 - [ ] text_editor view_range with end=-1 edge case testing
-- [ ] Real-world: use text_editor for a multi-step editing workflow inside VM
-- [ ] Research: latest Computer Use API changes (new actions, params)
+- [x] Real-world: use text_editor for a multi-step editing workflow inside VM → ✅ cycle 32
+- [x] Research: latest Computer Use API changes (new actions, params) → ✅ cycle 32 (no changes)
+
+---
+
+## Cycle 32 (2026-03-08)
+
+### Clipboard Paste Verification & Race Fix
+
+Two improvements to clipboard-based typing reliability:
+
+**1. Read-back verification** — after setting clipboard, read it back and compare. If mismatch, retry once. Only for content ≤10KB (larger content too expensive to round-trip). Catches xclip failures, encoding issues, and X11 selection race conditions.
+
+**2. Paste safety dialog race fix** — XFCE terminal's "Potentially Unsafe Paste" dialog blocked multi-line clipboard paste. The 0.3s clipboard restore ran while the dialog was shown, causing the wrong content to be pasted.
+- **Fix 1**: Changed clipboard restore from blocking `sleep 0.3` to background `nohup ... &` with 2s delay. Non-blocking—type action returns immediately.
+- **Fix 2**: Disabled XFCE terminal unsafe paste dialog via `xfconf-query -c xfce4-terminal -p /misc-show-unsafe-paste-dialog -s false` (added to container `start.sh`).
+
+### Macro Edit Mode
+
+Added `mode="edit"` to `computer_macro` tool. Loads existing macro, replaces actions array, validates, writes back. Preserves name/source/created, updates actions/description/count + adds `modified` timestamp.
+
+Schema: `computer_macro(mode="edit", name="my-macro", actions="[new JSON array]")`
+
+### API Research: Implementation is Current
+
+Researched latest Anthropic docs (March 2026). Findings:
+- No new actions since `computer_20251124`
+- No new text_editor versions since `text_editor_20250728`
+- Our 34 MCP tools exceed the official 16-action spec with 18 bonus tools
+- `max_characters` param (added cycle 31) matches latest spec exactly
+
+### Real-World Dogfooding
+- Created Python fibonacci script via `computer_bash`
+- Opened in Mousepad GUI editor
+- Used Find & Replace (Search menu → Ctrl+R) to change 15→20 occurrences
+- Saved with Ctrl+S, ran in terminal — correct output (20 fibonacci numbers + F(50)=12586269025)
+- Tested multi-line paste in terminal after paste dialog fix — no dialog, content pasted correctly
+
+### Bug Found: Clipboard Paste Race Condition (Bug #23)
+**Problem**: `clipboardPaste()` restored original clipboard after 0.3s blocking sleep. XFCE terminal's paste safety dialog intercepted the paste, but by the time it was confirmed (>0.3s), the clipboard had already been restored to old content, pasting wrong text.
+**Root cause**: Synchronous `sleep 0.3` in `dockerExec` was too short for GUI interactions.
+**Fix**: Background restore (nohup + 2s) + disable paste dialog entirely.
+
+### Verification Results
+- **sc-125**: clipboard read-back verification — 4/4 tests (basic text+emoji, multi-line, shell chars, file-based) ✅
+- **sc-126**: macro edit mode — save→edit→verify round-trip, preserves metadata ✅
+- **sc-127**: real-world dogfooding — full create→edit→save→run workflow in VM ✅
+- **sc-128**: clipboard paste race fix — multi-line paste in terminal, no dialog ✅
+
+### Commits
+1. `66b4c9e` — feat: add clipboard paste verification and macro edit mode
+2. `93fba69` — fix: clipboard paste race condition with XFCE paste safety dialog
+
+### Code Stats
+- MCP server: ~3787 lines (up from ~3710)
+- 34 MCP tools (unchanged — edit is a mode, not a new tool)
+- Server version: 1.25.0
+
+### Next Steps
+- [ ] text_editor view_range edge case testing (end=-1, large files)
+- [ ] Macro dry-run mode (preview without executing)
+- [ ] Computer Use API: monitor for 2026 updates
+- [ ] Explore: idle detection (auto-screenshot if no actions for N seconds)
+- [ ] Performance: benchmark screenshot latency, optimize if >500ms
