@@ -976,4 +976,58 @@ Significant OCR accuracy improvement for text on colored/dark backgrounds.
 - [ ] `computer_type_file` — type large content via file (bypass xdotool limits)
 - [ ] Edge case testing: large files, special filenames, symlinks
 - [ ] Session replay with screenshot comparison (diff against recorded screenshots)
-- [ ] OCR word segmentation improvement (handle merged words like "signin" → "sign in")
+- [x] OCR word segmentation improvement (handle merged words like "signin" → "sign in") ✅ Done in cycle 20
+
+---
+
+## Cycle 20 (2026-03-08)
+
+### New Features
+
+#### 1. `computer_window_focus` — Window Activation Tool
+- Focus/activate any window by title substring (case-insensitive) or X window ID
+- Uses `xdotool windowactivate` + `windowfocus`
+- Returns screenshot after focus with window title confirmation
+- Works with `computer_window_list` for discovery → focus workflow
+
+#### 2. `computer_wait_for_text` — OCR Text Polling
+- Waits until specific text appears on screen via periodic OCR polling
+- Configurable timeout (1-120s, default 30), interval (0.5-10s, default 2)
+- Optional auto-click when text found
+- Region support for targeted waiting
+- Returns coordinate of found text (ready for clicking) + elapsed time
+- Uses `findTextOnScreen()` with full color channel fallback
+- Clean timeout message when text never appears
+
+#### 3. OCR Concatenation Fallback — Word Segmentation Fix
+- **Problem**: Tesseract merges adjacent words on colored backgrounds (e.g. "Sign in" → "signin")
+- **Fix**: `matchWordsToQuery()` now checks concatenation of adjacent same-line words
+  - Single-word queries: after direct match fails, tries concatenating 2-3 adjacent words
+  - Multi-word queries: after multi-word match fails, checks if single OCR words contain the joined query
+  - Both directions covered: "sign in" finds "signin", and "signin" still finds "signin" directly
+- Refactored match result building into shared `buildMatch()` helper
+
+### Real-World Dogfooding
+- Wrote and ran a Python fibonacci script via terminal (type + key actions)
+- Window switching: terminal → Firefox → back, all smooth
+- GitHub header text found via concatenation fallback ("sign in" → "signin" at 43%)
+
+### Verification Results
+- **sc-73**: ✅ All 25 MCP tools loaded after hot restart
+- **sc-74**: ✅ `window_focus` focused terminal by title, then Firefox by title
+- **sc-75**: ✅ "sign in" found "signin" on GitHub dark header via concatenation fallback
+- **sc-76**: ✅ `wait_for_text` found visible text in 1.0s, timeout exits cleanly after 5s
+
+### Commits
+1. `b814e59` — feat: window focus, wait-for-text, OCR word concatenation (v1.14.0)
+
+### Code Stats
+- MCP server: ~2303 lines (up from ~2190)
+- 27 MCP tools (up from 25)
+- Server version: 1.14.0
+
+### Next Steps
+- [ ] `computer_type_file` — type large content via file (bypass xdotool limits)
+- [ ] Edge case testing: large files, special filenames, symlinks
+- [ ] Session replay with screenshot comparison
+- [ ] `computer_window_move` / `computer_window_resize` — window manipulation
