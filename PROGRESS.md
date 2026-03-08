@@ -1321,8 +1321,77 @@ Visual regression testing tool with 3 modes:
 - Server version: 1.19.0
 
 ### Next Steps
-- [ ] `computer_macro` tool (record + replay named action sequences)
+- [x] `computer_macro` tool (record + replay named action sequences)
 - [ ] `computer_window_tile` gap testing + cascade layout verification
 - [ ] Terminal detection improvements (more shell/emulator patterns)
 - [ ] Clipboard paste verification (ensure content actually arrived)
-- [ ] Screenshot diff: add "delete" mode to remove old baselines
+- [x] Screenshot diff: add "delete" mode to remove old baselines
+
+## Cycle 27 (2026-03-08)
+
+### New Tool: `computer_macro`
+
+Reusable named action sequences (macros) with 4 modes:
+
+#### Save Mode
+- Define macros from a JSON array of actions
+- Convert existing session recordings into macros via `from_session`
+- Validates all action types before saving
+- Auto-generates description from action counts
+- Stored as JSON in `/workspace/.macros/`
+
+#### Run Mode
+- Executes all actions in sequence with timing
+- `repeat` param: run macro N times (1-100, default 1)
+- `speed` param: playback speed multiplier (0.1x-10x, default 1.0)
+- `delay_between` param: seconds between repetitions (default 0.5)
+- Handles wait/screenshot/zoom actions inline (not covered by `executeAction()`)
+- Per-action error tracking (continues on error, reports at end)
+- Returns final screenshot
+
+#### List Mode
+- Shows all saved macros with action counts and descriptions
+
+#### Delete Mode
+- Remove single macro by name, or all macros with `name="all"`
+
+### Screenshot Diff: Delete Mode
+- Added `delete` mode to `computer_screenshot_diff`
+- Delete single baseline by name
+- Delete all baselines with `name="all"`
+- Now 4 modes: save, compare, list, delete
+
+### Bug Fix: Macro Runner
+- `executeAction()` only handles xdotool actions (click, type, key, scroll, etc.)
+- `wait`, `screenshot`, `zoom`, `cursor_position` are handled in the main tool handler
+- Macro runner now handles these inline: wait = async sleep, others = no-op in macro context
+
+### Verification Results
+- **screenshot_diff delete**: Single delete + delete all both work correctly
+- **macro save (JSON)**: 4-action open-new-tab macro saved with correct description
+- **macro save (from_session)**: Converted test-cycle14 session into macro (3 actions)
+- **macro save (validation)**: Invalid action type rejected with helpful error
+- **macro run**: open-new-tab 4/4 actions (including wait), close-tab 2/2 with repeat=2 speed=2x
+- **macro list**: Shows 3 macros with action counts and descriptions
+- **macro delete**: Single delete works, not-found error handled
+- **dogfooding**: page-down-3x macro (3 scrolls + 2 waits) scrolled Anthropic docs; go-to-top returned to page top
+
+### Anthropic Spec Note (from browsing docs)
+- `computer-use-2025-11-24` now listed for: Claude Opus 4.6, Claude Sonnet 4.6, Claude Opus 4.5
+- `computer-use-2025-01-24` deprecated (Sonnet 4.5, Haiku 4.5, Opus 4.1, Sonnet 4, Opus 4, Sonnet 3.7)
+
+### Commits
+1. `d4a3fe7` — feat: add computer_macro tool and screenshot_diff delete mode
+2. `8a5a260` — fix: handle wait/screenshot/zoom actions in macro runner
+
+### Code Stats
+- MCP server: ~3230 lines (up from ~2943)
+- 32 MCP tools (up from 31)
+- Server version: 1.20.0
+
+### Next Steps
+- [ ] `computer_annotate` tool (draw rectangles/arrows on screenshots)
+- [ ] `computer_window_tile` gap testing + cascade layout verification
+- [ ] Terminal detection improvements (more shell/emulator patterns)
+- [ ] Clipboard paste verification (ensure content actually arrived)
+- [ ] Macro: add "edit" mode to modify existing macros
