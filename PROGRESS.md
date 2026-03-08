@@ -2276,10 +2276,54 @@ After closing a tab, mouse cursor now moves to viewport center to prevent Firefo
 - Server version: 1.42.0
 
 ### Next Steps
-- [ ] Test close_others after MCP reload
+- [x] Test close_others after MCP reload → Fixed phantom tab bug (cycle 50)
 - [ ] A11y form validation reading (read error messages after submit)
 - [ ] Smart form fill: combine a11y_fill + a11y_select in one call
 - [ ] Investigate Sonnet 5 / Fennec computer use compatibility when released
+
+## Cycle 50 (2026-03-08)
+
+### Critical Bug Fix: Phantom Tab in getBrowserTabs
+
+#### Root cause discovery (38a782e)
+`getBrowserTabs()` used `queryA11yFlat({ role: "page tab" })` which **substring-matched** `"page tab list"` (the AT-SPI2 container element for all tabs). This phantom entry:
+- Had empty name → appeared as "(untitled)" in tab lists
+- Had bbox covering the **entire tab bar** (x:42, y:51, width:942, height:44)
+- When `clickTab()` targeted it, xdotool clicked the center of the whole tab bar, landing on random real tabs
+
+**Impact**: Every tab-related operation was affected:
+- `tabs list` showed inflated count (N+1 tabs)
+- `close_others` clicked phantom → closed random tabs including keep tab → Firefox exited
+- `close` could target wrong tab by index (off by one)
+
+**Fix**: Added exact role filter `node.role === "page tab"` in `getBrowserTabs()`, rejecting `"page tab list"`.
+
+#### close_others reimplemented
+After fixing the phantom tab, close_others now:
+1. Re-queries a11y tree before each close (fresh bbox coordinates)
+2. Finds victim by title !== keepTitle
+3. Clicks victim (accurate coords), waits 500ms, Ctrl+W
+4. Repeats until 1 tab remains
+5. Moves mouse to viewport center to prevent tooltip
+
+Tested with both `target` param and default (keep active) modes. Both pass.
+
+### Commits (5 iterations to diagnose)
+1. `73deca1` — fix: close_others uses Firefox native context menu (failed: a11y can't find menu items)
+2. `2bc6da0` — fix: close_others re-queries tabs before each close (failed: phantom tab)
+3. `48a7c02` — fix: close_others increases delays, adds stuck detection (failed: phantom tab)
+4. `59cf3d7` — fix: close_others uses keyboard-only Ctrl+Tab + Ctrl+W (failed: phantom tab)
+5. `38a782e` — **fix: getBrowserTabs filters by exact role** — root cause fix
+
+### Code Stats
+- MCP server: ~6110 lines (net unchanged — added exact role filter, simplified close_others)
+- 49 MCP tools
+- Server version: 1.42.1
+
+### Next Steps
+- [ ] A11y form validation reading (read error messages after submit)
+- [ ] Smart form fill: combine a11y_fill + a11y_select in one call
+- [ ] Investigate adaptive screenshot delay (shorter for simple actions)
 
 ## Cycle 47 (2026-03-08)
 
