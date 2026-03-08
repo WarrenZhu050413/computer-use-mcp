@@ -911,8 +911,69 @@ High-value navigation tool that combines OCR text search with automatic scrollin
 - Server version: 1.12.0
 
 ### Next Steps
-- [ ] OCR preprocessing for colored backgrounds (grayscale/threshold before tesseract)
+- [x] OCR preprocessing for colored backgrounds → ✅ cycle 19 (color channel fallback)
 - [ ] `computer_type_file` — type large content via file (bypass xdotool limits)
 - [ ] Edge case testing: large files, special filenames, symlinks
 - [ ] Session replay with screenshot comparison (diff against recorded screenshots)
-- [ ] scroll_to direction="up" testing (scroll up to find text above current viewport)
+- [x] scroll_to direction="up" testing → ✅ cycle 19
+
+---
+
+## Cycle 19 (2026-03-08)
+
+### OCR Color Channel Fallback for Colored Backgrounds
+Significant OCR accuracy improvement for text on colored/dark backgrounds.
+
+**Problem:**
+- Full-screen OCR (`--psm 3`) completely missed text on colored backgrounds
+- HN orange navbar: "login" not found at all on full-screen pass
+- GitHub dark header: "Sign in" / "Sign up" not found on full-screen pass
+- Region-cropped OCR worked fine — the issue was tesseract's full-page binarization
+
+**Solution: Color channel fallback**
+- When primary OCR pass finds no matches, automatically retry on each RGB channel separately
+- `convert image.png -channel R -separate` extracts one color channel as grayscale
+- Different channels give better contrast for different background colors
+- Tries R, G, B in order, stops on first channel with matches
+- Zero overhead when text IS found on primary pass (common case)
+
+**Refactored helpers:**
+- `parseTesseractTsv(tsv)` — parse tesseract TSV into word objects (extracted from findTextOnScreen)
+- `matchWordsToQuery(words, query, ...)` — search words for query matches (extracted from findTextOnScreen)
+- Both reused by primary pass and channel fallback passes
+
+**Results:**
+- HN "login" on orange bar: NOT FOUND → **found at 90% confidence** (via R channel)
+- GitHub "signin" on dark header: NOT FOUND → **found at 58% confidence** (via R channel)
+- White background text: no regression, still 90%+ confidence
+- scroll_to: still works correctly after refactor
+
+**Limitations:**
+- OCR may merge "Sign in" → "signin" (tesseract word segmentation) — search for "signin" works
+- Channel fallback adds ~3-9s latency when text not found on primary pass (3 extra tesseract runs)
+- Very low contrast text (gray on slightly different gray) may still be missed
+
+### Additional Testing
+- **scroll_to direction="up"**: ✅ Found "Why can't you tune your guitar" after 2 scrolls up
+- **GitHub real-world**: ✅ Navigated to github.com/anthropics/claude-code, found header text via channel fallback
+- **Multi-word on colored bg**: "Sign in" (2 words) missed because OCR merges to "signin" — inherent OCR limitation
+
+### Verification Results
+- **sc-69**: ✅ MCP server loaded after hot restart
+- **sc-70**: ✅ "login" found at [919,235] with 90% confidence on HN orange navbar (full screen, no region)
+- **sc-71**: ✅ "Hacker News" found 3 matches at 92%/93%/47% confidence on white background
+- **sc-72**: ✅ scroll_to found "More" at [136,656] after 2 scrolls, 94% confidence
+
+### Commits
+1. `f92b51d` — feat: OCR color channel fallback for colored backgrounds (v1.13.0)
+
+### Code Stats
+- MCP server: ~2190 lines (up from ~2137)
+- 25 MCP tools (unchanged)
+- Server version: 1.13.0
+
+### Next Steps
+- [ ] `computer_type_file` — type large content via file (bypass xdotool limits)
+- [ ] Edge case testing: large files, special filenames, symlinks
+- [ ] Session replay with screenshot comparison (diff against recorded screenshots)
+- [ ] OCR word segmentation improvement (handle merged words like "signin" → "sign in")
