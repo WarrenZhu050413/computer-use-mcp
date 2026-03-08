@@ -1180,11 +1180,11 @@ server.tool(
       await new Promise(r => setTimeout(r, waitSec * 1000));
 
       // Take screenshot
-      const { base64, width, height, format } = takeScreenshot(cn);
+      const ss = takeScreenshot(cn);
       return {
         content: [
-          { type: "image", data: base64, mimeType: `image/${format}` },
-          { type: "text", text: `Navigated to ${targetUrl} (${width}x${height}, waited ${waitSec}s)` }
+          { type: "image", data: ss.data, mimeType: ss.mimeType },
+          { type: "text", text: `Navigated to ${targetUrl} (${ss.apiWidth}x${ss.apiHeight}, waited ${waitSec}s)` }
         ]
       };
     } catch (err) {
@@ -1225,11 +1225,11 @@ server.tool(
 
       await new Promise(r => setTimeout(r, waitSec * 1000));
 
-      const { base64, width, height, format } = takeScreenshot(cn);
+      const ss = takeScreenshot(cn);
       return {
         content: [
-          { type: "image", data: base64, mimeType: `image/${format}` },
-          { type: "text", text: `Opened ${target}${extraArgs} (${width}x${height})` }
+          { type: "image", data: ss.data, mimeType: ss.mimeType },
+          { type: "text", text: `Opened ${target}${extraArgs} (${ss.apiWidth}x${ss.apiHeight})` }
         ]
       };
     } catch (err) {
